@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import inspect
 import json as json_module
 import uuid as uuid_type
@@ -12,6 +13,7 @@ from django.urls import NoReverseMatch, path, reverse
 
 from .exceptions import DjsonApiException, InternalServerError
 from .resource import MISSING, Resource
+from .response import Response
 
 _PYTHON_TO_DJANGO_PATH = {
     uuid_type.UUID: "uuid",
@@ -28,28 +30,33 @@ _PYTHON_TO_OPENAPI = {
 }
 
 
-_QUERY_PARAM_FAMILIES: dict = {
-    "filter": {"flat": False, "nested": True, "strip": False},
-    "page": {"flat": True, "nested": True, "strip": False},
-    "sort": {"flat": True, "nested": False, "strip": False},
-    "include": {"flat": False, "nested": True, "strip": False, "bool_by_presence": True},
-    "fields": {"flat": False, "nested": True, "strip": False},
-    "extra": {"flat": False, "nested": True, "strip": True},
-}
-
 _MUTABLE_DEFAULT = object()
 
+_VALID_PREFIXES = ["filter__", "page", "sort", "include__", "fields__", "extra__"]
 
-def _query_param_name(key: str) -> str:
-    parts = key.split("__")
-    prefix = parts[0]
-    family = _QUERY_PARAM_FAMILIES.get(prefix)
-    if family and family.get("strip"):
-        return "__".join(parts[1:])
-    result = parts[0]
-    for part in parts[1:]:
-        result += f"[{part}]"
-    return result
+
+def _bracket_name(prefix: str, suffix: str) -> str:
+    parts = suffix.split("__")
+    return prefix + "[" + "][".join(parts) + "]"
+
+
+def _query_param_name(name: str) -> str:
+    if name.startswith("filter__"):
+        return _bracket_name("filter", name[len("filter__"):])
+    if name.startswith("page"):
+        if "__" in name:
+            _, suffix = name.split("__", 1)
+            return f"page[{suffix}]"
+        return "page"
+    if name == "sort":
+        return "sort"
+    if name.startswith("include__"):
+        return "include"
+    if name.startswith("fields__"):
+        return f"fields[{name[len('fields__'):]}]"
+    if name.startswith("extra__"):
+        return name[len("extra__"):]
+    raise ValueError(f"Unknown query parameter: {name}")
 
 
 def _validate_and_convert(raw: str, tp: type, query_name: str) -> Any:
@@ -59,7 +66,7 @@ def _validate_and_convert(raw: str, tp: type, query_name: str) -> Any:
         item_tp = args[0] if args else str
         if not raw.strip():
             return []
-        return [  # type: ignore[return-value]
+        return [
             _validate_and_convert(item.strip(), item_tp, query_name) for item in raw.split(",")
         ]
     if tp is int:
@@ -87,44 +94,42 @@ def _extract_fields(query_params: dict) -> dict | None:
 def _extract_query_params(handler: Callable, request: HttpRequest, exclude: frozenset = frozenset()) -> dict:
     sig = inspect.signature(handler)
     result: dict = {}
+
+    include_suffixes = []
+    for name in sig.parameters:
+        if name == "request" or name in exclude:
+            continue
+        if name.startswith("include__"):
+            include_suffixes.append(name[len("include__"):])
+
+    if include_suffixes:
+        raw_include = request.GET.get("include", "")
+        assert isinstance(raw_include, str)
+        included_set = set(raw_include.split(",")) if raw_include.strip() else set()
+        for suffix in include_suffixes:
+            param = sig.parameters[f"include__{suffix}"]
+            default = param.default if param.default != inspect.Parameter.empty else False
+            result[f"include__{suffix}"] = suffix in included_set
+
     for name, param in sig.parameters.items():
-        if name == "request":
-            continue
-        if param.kind == inspect.Parameter.VAR_KEYWORD:
-            continue
-        if name in exclude:
+        if name == "request" or name in exclude or name in result:
             continue
         annotation = param.annotation if param.annotation != inspect.Parameter.empty else str
         if isinstance(annotation, type) and issubclass(annotation, Resource):
             continue
-        parts = name.split("__")
-        prefix = parts[0]
-        family = _QUERY_PARAM_FAMILIES.get(prefix)
-        if not family:
-            continue
-        is_flat = len(parts) == 1
-        if is_flat and not family.get("flat", False):
-            raise ValueError(f"'{prefix}' requires sub-parameters (e.g., '{prefix}__xxx')")
-        if not is_flat and not family.get("nested", False):
-            raise ValueError(f"'{prefix}' does not accept sub-parameters")
+
         default = param.default if param.default != inspect.Parameter.empty else _MUTABLE_DEFAULT
         query_name = _query_param_name(name)
-        bool_by_presence = family.get("bool_by_presence", False) and annotation is bool
-        if bool_by_presence:
-            if query_name in request.GET:
-                result[name] = True
-            elif default is not _MUTABLE_DEFAULT:
-                result[name] = default
-            else:
-                raise ValueError(f"Missing required query parameter: {query_name}")
-            continue
+
         raw = request.GET.get(query_name)
         if raw is None:
             if default is _MUTABLE_DEFAULT:
                 raise ValueError(f"Missing required query parameter: {query_name}")
             result[name] = default
-            continue
-        result[name] = _validate_and_convert(raw, annotation, query_name)
+        else:
+            assert isinstance(raw, str)
+            result[name] = _validate_and_convert(raw, annotation, query_name)
+
     return result
 
 
@@ -144,44 +149,46 @@ def _type_to_openapi_schema(tp: type) -> dict:
 def _handler_query_params(handler: Callable) -> list[dict]:
     sig = inspect.signature(handler)
     params = []
-    for name, param in sig.parameters.items():
+
+    include_suffixes = []
+    for name in sig.parameters:
         if name == "request":
             continue
-        if param.kind == inspect.Parameter.VAR_KEYWORD:
+        if name.startswith("include__"):
+            include_suffixes.append(name[len("include__"):])
+    if include_suffixes:
+        description = f"Allowed values: {', '.join(sorted(include_suffixes))}"
+        params.append({
+            "name": "include",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string"},
+            "description": description,
+        })
+
+    for name, param in sig.parameters.items():
+        if name == "request":
             continue
         annotation = param.annotation if param.annotation != inspect.Parameter.empty else str
         if isinstance(annotation, type) and issubclass(annotation, Resource):
             continue
-        parts = name.split("__")
-        prefix = parts[0]
-        family = _QUERY_PARAM_FAMILIES.get(prefix)
-        if not family:
+        if name.startswith("include__"):
             continue
-        is_flat = len(parts) == 1
-        if is_flat and not family.get("flat", False):
+        if not any(name.startswith(p) for p in _VALID_PREFIXES):
             continue
-        if not is_flat and not family.get("nested", False):
-            continue
+
         has_default = param.default is not inspect.Parameter.empty
         query_name = _query_param_name(name)
-        if family.get("bool_by_presence", False) and annotation is bool:
-            param_obj = {
-                "name": query_name,
-                "in": "query",
-                "required": False,
-                "schema": {"type": "boolean"},
-            }
-        else:
-            param_obj = {
-                "name": query_name,
-                "in": "query",
-                "required": not has_default,
-                "schema": _type_to_openapi_schema(annotation),
-            }
-            if has_default and param.default is not None:
-                default = param.default
-                if isinstance(default, (str, int, float, bool)):
-                    param_obj["schema"]["default"] = default
+        param_obj = {
+            "name": query_name,
+            "in": "query",
+            "required": not has_default,
+            "schema": _type_to_openapi_schema(annotation),
+        }
+        if has_default and param.default is not None:
+            default = param.default
+            if isinstance(default, (str, int, float, bool)):
+                param_obj["schema"]["default"] = default
         params.append(param_obj)
     return params
 
@@ -190,6 +197,27 @@ def _add_query_params_to_op(handler: Callable, op: dict) -> None:
     query_params = _handler_query_params(inspect.unwrap(handler))
     if query_params:
         op.setdefault("parameters", []).extend(query_params)
+
+
+def _unwrap_response(raw):
+    if isinstance(raw, Response):
+        return raw.data, list(raw.included) if raw.included else None
+    return raw, None
+
+
+def _validate_handler_params(handler: Callable, exclude: frozenset = frozenset()) -> None:
+    sig = inspect.signature(handler)
+    for name, param in sig.parameters.items():
+        if name == "request" or name in exclude:
+            continue
+        annotation = param.annotation if param.annotation != inspect.Parameter.empty else str
+        if isinstance(annotation, type) and issubclass(annotation, Resource):
+            continue
+        if not any(name.startswith(p) for p in _VALID_PREFIXES):
+            raise ImproperlyConfigured(
+                f"Invalid parameter '{name}' in handler '{handler.__name__}'. "
+                f"Must start with one of: {', '.join(_VALID_PREFIXES)}"
+            )
 
 
 class DjsonApi:
@@ -203,6 +231,7 @@ class DjsonApi:
             params = list(sig.parameters.values())
             pk_param = [p for p in params if p.name != "request"][0]
             pk_name = pk_param.name
+            _validate_handler_params(handler, exclude=frozenset([pk_name]))
             pk_type = (
                 pk_param.annotation if pk_param.annotation != inspect.Parameter.empty else str
             )
@@ -245,12 +274,11 @@ class DjsonApi:
                         )
                     return _one_response(result, url_name, kwargs, self._type_to_endpoint(), fields=_extract_fields(query_params))
 
-                async_wrapper.__name__ = handler.__name__
-                async_wrapper.__qualname__ = handler.__qualname__
-                async_wrapper.__module__ = handler.__module__
-                async_wrapper.__doc__ = handler.__doc__
-                async_wrapper.__wrapped__ = handler
-                wrapper = async_wrapper
+                wrapper = functools.update_wrapper(
+                    async_wrapper, handler,
+                    assigned=("__module__", "__name__", "__qualname__", "__doc__"),
+                    updated=(),
+                )
             else:
 
                 def sync_wrapper(request, **kwargs) -> JsonResponse:
@@ -276,14 +304,14 @@ class DjsonApi:
                             status=ise.status,
                             content_type="application/vnd.api+json",
                         )
-                    return _one_response(result, url_name, kwargs, self._type_to_endpoint(), fields=_extract_fields(query_params))
+                    raw, included = _unwrap_response(result)
+                    return _one_response(raw, url_name, kwargs, self._type_to_endpoint(), fields=_extract_fields(query_params), included=included)
 
-                sync_wrapper.__name__ = handler.__name__
-                sync_wrapper.__qualname__ = handler.__qualname__
-                sync_wrapper.__module__ = handler.__module__
-                sync_wrapper.__doc__ = handler.__doc__
-                sync_wrapper.__wrapped__ = handler
-                wrapper = sync_wrapper
+                wrapper = functools.update_wrapper(
+                    sync_wrapper, handler,
+                    assigned=("__module__", "__name__", "__qualname__", "__doc__"),
+                    updated=(),
+                )
 
             self._registry.append(
                 {
@@ -301,6 +329,7 @@ class DjsonApi:
 
     def get_many(self, type_name: str) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
+            _validate_handler_params(handler)
             url_name = f"get_many__{type_name}"
             sig = inspect.signature(handler)
             return_type = sig.return_annotation
@@ -340,12 +369,11 @@ class DjsonApi:
                         )
                     return _many_response(result, url_name, self._type_to_endpoint(), fields=_extract_fields(query_params))
 
-                async_wrapper.__name__ = handler.__name__
-                async_wrapper.__qualname__ = handler.__qualname__
-                async_wrapper.__module__ = handler.__module__
-                async_wrapper.__doc__ = handler.__doc__
-                async_wrapper.__wrapped__ = handler
-                wrapper = async_wrapper
+                wrapper = functools.update_wrapper(
+                    async_wrapper, handler,
+                    assigned=("__module__", "__name__", "__qualname__", "__doc__"),
+                    updated=(),
+                )
             else:
 
                 def sync_wrapper(request, **kwargs) -> JsonResponse:
@@ -371,14 +399,14 @@ class DjsonApi:
                             status=ise.status,
                             content_type="application/vnd.api+json",
                         )
-                    return _many_response(result, url_name, self._type_to_endpoint(), fields=_extract_fields(query_params))
+                    raw, included = _unwrap_response(result)
+                    return _many_response(raw, url_name, self._type_to_endpoint(), fields=_extract_fields(query_params), included=included)
 
-                sync_wrapper.__name__ = handler.__name__
-                sync_wrapper.__qualname__ = handler.__qualname__
-                sync_wrapper.__module__ = handler.__module__
-                sync_wrapper.__doc__ = handler.__doc__
-                sync_wrapper.__wrapped__ = handler
-                wrapper = sync_wrapper
+                wrapper = functools.update_wrapper(
+                    sync_wrapper, handler,
+                    assigned=("__module__", "__name__", "__qualname__", "__doc__"),
+                    updated=(),
+                )
 
             self._registry.append(
                 {
@@ -394,6 +422,7 @@ class DjsonApi:
 
     def create_one(self, type_name: str) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
+            _validate_handler_params(handler)
             url_name = f"create_one__{type_name}"
             sig = inspect.signature(handler)
             params = list(sig.parameters.values())
@@ -419,10 +448,12 @@ class DjsonApi:
                     try:
                         body = json_module.loads(request.body)
                         data = body.get("data", {})
+                        assert resource_class is not None
                         jsonschema.validate(data, resource_class.jsonschema_create())
                         payload = resource_class._from_jsonapi_payload(body)
                         result = await handler(request, payload=payload, **query_params)
-                        return _create_response(result, type_name, self._type_to_endpoint())
+                        raw, included = _unwrap_response(result)
+                        return _create_response(raw, type_name, self._type_to_endpoint(), included=included)
                     except json_module.JSONDecodeError as exc:
                         return JsonResponse(
                             {
@@ -452,12 +483,11 @@ class DjsonApi:
                             content_type="application/vnd.api+json",
                         )
 
-                async_wrapper.__name__ = handler.__name__
-                async_wrapper.__qualname__ = handler.__qualname__
-                async_wrapper.__module__ = handler.__module__
-                async_wrapper.__doc__ = handler.__doc__
-                async_wrapper.__wrapped__ = handler
-                wrapper = async_wrapper
+                wrapper = functools.update_wrapper(
+                    async_wrapper, handler,
+                    assigned=("__module__", "__name__", "__qualname__", "__doc__"),
+                    updated=(),
+                )
             else:
 
                 def sync_wrapper(request, **kwargs) -> JsonResponse:
@@ -471,10 +501,12 @@ class DjsonApi:
                     try:
                         body = json_module.loads(request.body)
                         data = body.get("data", {})
+                        assert resource_class is not None
                         jsonschema.validate(data, resource_class.jsonschema_create())
                         payload = resource_class._from_jsonapi_payload(body)
                         result = handler(request, payload=payload, **query_params)
-                        return _create_response(result, type_name, self._type_to_endpoint())
+                        raw, included = _unwrap_response(result)
+                        return _create_response(raw, type_name, self._type_to_endpoint(), included=included)
                     except json_module.JSONDecodeError as exc:
                         return JsonResponse(
                             {
@@ -504,12 +536,11 @@ class DjsonApi:
                             content_type="application/vnd.api+json",
                         )
 
-                sync_wrapper.__name__ = handler.__name__
-                sync_wrapper.__qualname__ = handler.__qualname__
-                sync_wrapper.__module__ = handler.__module__
-                sync_wrapper.__doc__ = handler.__doc__
-                sync_wrapper.__wrapped__ = handler
-                wrapper = sync_wrapper
+                wrapper = functools.update_wrapper(
+                    sync_wrapper, handler,
+                    assigned=("__module__", "__name__", "__qualname__", "__doc__"),
+                    updated=(),
+                )
 
             self._registry.append(
                 {
@@ -730,10 +761,16 @@ def _apply_fields(resource, fields_for_type):
         resource["relationships"] = {k: v for k, v in resource["relationships"].items() if k in fields_for_type}
 
 
-def _one_response(result, url_name, kwargs, type_to_endpoint, fields=None):
+def _serialize_resource(result, type_to_endpoint, fields):
     resource = result.serialize()
+    _add_relationship_links(resource, type_to_endpoint)
     if fields:
         _apply_fields(resource, fields.get(result._type))
+    return resource
+
+
+def _one_response(result, url_name, kwargs, type_to_endpoint, fields=None, included=None):
+    resource = _serialize_resource(result, type_to_endpoint, fields)
     try:
         self_url = reverse(url_name, kwargs=kwargs)
         resource.setdefault("links", {})["self"] = self_url
@@ -741,28 +778,23 @@ def _one_response(result, url_name, kwargs, type_to_endpoint, fields=None):
     except (NoReverseMatch, ImproperlyConfigured):
         links = {}
 
-    _add_relationship_links(resource, type_to_endpoint)
-
-    body = {"data": resource, "links": links, "jsonapi": {"version": "1.0"}}
+    body: dict = {"data": resource, "links": links, "jsonapi": {"version": "1.0"}}
+    if included:
+        body["included"] = [_serialize_resource(r, type_to_endpoint, fields) for r in included]
     return JsonResponse(body, content_type="application/vnd.api+json")
 
 
-def _many_response(result_list, url_name, type_to_endpoint, fields=None):
-    resources = []
-    for result in result_list:
-        resource = result.serialize()
-        if fields:
-            _apply_fields(resource, fields.get(result._type))
-        _add_relationship_links(resource, type_to_endpoint)
-        resources.append(resource)
-
+def _many_response(result_list, url_name, type_to_endpoint, fields=None, included=None):
+    resources = [_serialize_resource(r, type_to_endpoint, fields) for r in result_list]
     try:
         self_url = reverse(url_name)
         links = {"self": self_url}
     except (NoReverseMatch, ImproperlyConfigured):
         links = {}
 
-    body = {"data": resources, "links": links, "jsonapi": {"version": "1.0"}}
+    body: dict = {"data": resources, "links": links, "jsonapi": {"version": "1.0"}}
+    if included:
+        body["included"] = [_serialize_resource(r, type_to_endpoint, fields) for r in included]
     return JsonResponse(body, content_type="application/vnd.api+json")
 
 
@@ -816,12 +848,11 @@ class _CombinedView:
         return handler(request, **kwargs)
 
 
-def _create_response(result, type_name, type_to_endpoint):
+def _create_response(result, type_name, type_to_endpoint, fields=None, included=None):
     if result is None:
         return JsonResponse({"jsonapi": {"version": "1.0"}}, status=202)
 
-    resource = result.serialize()
-    _add_relationship_links(resource, type_to_endpoint)
+    resource = _serialize_resource(result, type_to_endpoint, fields)
 
     endpoint = type_to_endpoint.get(type_name)
     location = None
@@ -836,11 +867,10 @@ def _create_response(result, type_name, type_to_endpoint):
             except (NoReverseMatch, ImproperlyConfigured):
                 pass
 
-    response = JsonResponse(
-        {"data": resource, "jsonapi": {"version": "1.0"}},
-        status=201,
-        content_type="application/vnd.api+json",
-    )
+    body: dict = {"data": resource, "jsonapi": {"version": "1.0"}}
+    if included:
+        body["included"] = [_serialize_resource(r, type_to_endpoint, fields) for r in included]
+    response = JsonResponse(body, status=201, content_type="application/vnd.api+json")
     if location:
         response["Location"] = location
     return response

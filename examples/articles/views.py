@@ -1,6 +1,6 @@
 from django.http import HttpRequest
 
-from djsonapi import DjsonApi
+from djsonapi import DjsonApi, Response
 from djsonapi.exceptions import NotFound
 
 from .models import Article, User
@@ -25,28 +25,44 @@ def get_article(request: HttpRequest, article_id: int) -> ArticleResource:
 
 
 @api.get_many("articles")
-def list_articles(request: HttpRequest, filter__title__contains: str = "") -> list[ArticleResource]:
-    articles = Article.objects.all()
+def list_articles(
+    request: HttpRequest, filter__title__contains: str = "", include__author=False
+) -> Response[list[ArticleResource]]:
+    qs = Article.objects.all()
     if filter__title__contains:
-        articles = articles.filter(title__contains=filter__title__contains)
-    return [
-        ArticleResource(
-            id=article.id,
-            title=article.title,
-            content=article.content,
-            created_at=article.created_at,
-            author=article.author_id,
+        qs = qs.filter(title__contains=filter__title__contains)
+    if include__author:
+        qs = qs.select_related("author")
+    articles = list[ArticleResource]()
+    users = set[UserResource]()
+    for article in qs:
+        articles.append(
+            ArticleResource(
+                id=article.id,
+                title=article.title,
+                content=article.content,
+                created_at=article.created_at,
+                author=article.author_id,
+            )
         )
-        for article in articles
-    ]
+        if include__author:
+            users.add(
+                UserResource(
+                    id=article.author.pk,
+                    username=article.author.username,
+                    email=article.author.email,
+                )
+            )
+    return Response(
+        data=articles,
+        included=list(users) if include__author else None,
+    )
 
 
 @api.create_one("articles")
 def create_article(request: HttpRequest, payload: ArticleResource) -> ArticleResource:
     article = Article.objects.create(
-        title=payload.title,
-        content=payload.content,
-        author_id=payload.author,
+        title=payload.title, content=payload.content, author_id=payload.author
     )
     return ArticleResource(
         id=article.id,
@@ -63,14 +79,10 @@ def get_user(request: HttpRequest, user_id: int) -> UserResource:
         user = User.objects.get(id=user_id)
     except User.DoesNotExist:
         raise NotFound(f"User with id '{user_id}' not found")
-    return UserResource(
-        id=user.id,
-        username=user.username,
-        email=user.email,
-    )
+    return UserResource(id=user.pk, username=user.username, email=user.email)
 
 
 @api.get_many("users")
 def list_users(request: HttpRequest) -> list[UserResource]:
     users = User.objects.all()
-    return [UserResource(id=user.id, username=user.username, email=user.email) for user in users]
+    return [UserResource(id=user.pk, username=user.username, email=user.email) for user in users]

@@ -9,6 +9,7 @@ from typing import (
     ClassVar,
     Literal,
     Sequence,
+    cast,
     dataclass_transform,
     get_args,
     get_origin,
@@ -68,6 +69,7 @@ def _type_to_schema(tp: Any, default: Any = MISSING) -> dict:
 
 @dataclass_transform()
 class Resource:
+    id: Any
     _type: ClassVar[str] = ""
     _attributes: ClassVar[list[str]] = []
     _singular_relationships: ClassVar[Any] = []
@@ -94,9 +96,19 @@ class Resource:
                 )
         return result
 
+    def __hash__(self) -> int:
+        return hash((self._type, getattr(self, "id", None)))
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Resource):
+            return NotImplemented
+        return self._type == other._type and getattr(self, "id", None) == getattr(other, "id", None)
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         dataclass(cls)
+        cls.__hash__ = Resource.__hash__
+        cls.__eq__ = Resource.__eq__
         cls._singular_relationships = cls._normalize_relationships(
             cls._singular_relationships
         )
@@ -114,7 +126,7 @@ class Resource:
     @classmethod
     def _field_map(cls) -> dict[str, dict]:
         result: dict[str, dict] = {}
-        for f in dc_fields(cls):  # type: ignore[arg-type]
+        for f in dc_fields(cast(type, cls)):
             default = f.default if f.default is not DC_MISSING else MISSING
             result[f.name] = {"type": f.type, "default": default}
         return result

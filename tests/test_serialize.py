@@ -54,7 +54,7 @@ def test_missing_optional_attribute():
     id = uuid.uuid4()
     author = uuid.uuid4()
     article = Article(id=id, title="Hello", content="World", author=author)
-    article.content = MISSING  # type: ignore[attr-defined]
+    setattr(article, "content", MISSING)
     result = article.serialize()
     assert "content" not in result["attributes"]
     assert result["attributes"]["title"] == "Hello"
@@ -64,7 +64,7 @@ def test_missing_singular_relationship():
     id = uuid.uuid4()
     author = uuid.uuid4()
     article = Article(id=id, title="Hello", content="World", author=author)
-    article.author = MISSING  # type: ignore[attr-defined]
+    setattr(article, "author", MISSING)
     result = article.serialize()
     assert "author" not in result.get("relationships", {})
 
@@ -73,7 +73,7 @@ def test_no_id():
     id = uuid.uuid4()
     author = uuid.uuid4()
     article = Article(id=id, title="Hello", content="World", author=author)
-    article.id = MISSING  # type: ignore[attr-defined]
+    setattr(article, "id", MISSING)
     result = article.serialize()
     assert "id" not in result
 

@@ -5,6 +5,7 @@ import uuid
 from typing import ClassVar
 
 import django
+import pytest
 from django.conf import settings
 from django.http import HttpRequest
 from django.test import RequestFactory
@@ -12,6 +13,7 @@ from django.test.utils import override_settings
 
 from djsonapi import DjsonApi, Resource
 from djsonapi.exceptions import NotFound
+from djsonapi.response import Response
 
 settings.configure(
     DEBUG=True,
@@ -36,7 +38,7 @@ class Article(Resource):
 
 def _make_urlconf(api):
     module = types.ModuleType("_test_urls")
-    module.urlpatterns = api.urls  # type: ignore[attr-defined]
+    setattr(module, "urlpatterns", api.urls)
     sys.modules["_test_urls"] = module
     return "_test_urls"
 
@@ -653,7 +655,7 @@ class TestQueryParams:
             calls.append(include__author)
             return [Article(id=uuid.uuid4(), title="T", content="C")]
 
-        request = factory.get("/articles/?include[author]=true")
+        request = factory.get("/articles/?include=author")
         view(request)
         assert calls == [True]
 
@@ -709,7 +711,7 @@ class TestQueryParams:
         response = view(request)
         assert response.status_code == 400
 
-    def test_include_presence_based_bool(self):
+    def test_include_from_flat_csv(self):
         api = DjsonApi()
         factory = RequestFactory()
         calls = []
@@ -719,9 +721,24 @@ class TestQueryParams:
             calls.append(include__author)
             return [Article(id=uuid.uuid4(), title="T", content="C")]
 
-        request = factory.get("/articles/?include[author]=xyz")
+        request = factory.get("/articles/?include=author")
         view(request)
         assert calls == [True]
+
+    def test_include_multiple_from_flat_csv(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.get_many("articles")
+        def view(request, include__author: bool = False, include__comments: bool = False) -> list[Article]:
+            calls.append(include__author)
+            calls.append(include__comments)
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        request = factory.get("/articles/?include=author,comments")
+        view(request)
+        assert calls == [True, True]
 
     def test_include_absent_uses_default(self):
         api = DjsonApi()
@@ -786,17 +803,15 @@ class TestQueryParams:
         assert "sort" in params
         assert params["sort"]["schema"]["type"] == "array"
 
-    def test_bare_filter_returns_400(self):
+    def test_bare_filter_returns_error(self):
+        from django.core.exceptions import ImproperlyConfigured
+
         api = DjsonApi()
-        factory = RequestFactory()
+        with pytest.raises(ImproperlyConfigured):
 
-        @api.get_many("articles")
-        def view(request, filter: str = "") -> list[Article]:
-            return []
-
-        request = factory.get("/articles/?filter=hello")
-        response = view(request)
-        assert response.status_code == 400
+            @api.get_many("articles")
+            def view(request, filter: str = "") -> list[Article]:
+                return []
 
     def test_nested_sort_returns_400(self):
         api = DjsonApi()
@@ -863,13 +878,136 @@ class TestQueryParams:
         api = DjsonApi()
 
         @api.get_many("articles")
-        def view(request, include__author: bool = False) -> list[Article]: ...
+        def view(request, include__author: bool = False, include__comments: bool = False) -> list[Article]: ...
 
         spec = api._build_openapi_spec()
         op = spec["paths"]["/articles/"]["get"]
         params = {p["name"]: p for p in op.get("parameters", [])}
-        assert "include[author]" in params
-        assert params["include[author]"]["schema"]["type"] == "boolean"
+        assert "include" in params
+        assert params["include"]["schema"]["type"] == "string"
+        assert "author" in params["include"]["description"]
+        assert "comments" in params["include"]["description"]
+
+
+class TestResponse:
+    def test_plain_return_still_works(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_one("articles")
+        def view(request, article_id: uuid.UUID) -> Article:
+            return Article(id=article_id, title="T", content="C")
+
+        uid = uuid.uuid4()
+        request = factory.get(f"/articles/{uid}")
+        response = view(request, article_id=uid)
+        assert response.status_code == 200
+
+    def test_response_included_in_body(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: int
+            name: str
+
+        @api.get_many("articles")
+        def view(request) -> Response[list[Article]]:
+            author = Author(id=1, name="Alice")
+            return Response(
+                data=[Article(id=uuid.uuid4(), title="T", content="C")],
+                included=[author],
+            )
+
+        request = factory.get("/articles/")
+        response = view(request)
+        body = json.loads(response.content)
+        assert "included" in body
+        assert len(body["included"]) == 1
+        assert body["included"][0]["type"] == "authors"
+        assert body["included"][0]["id"] == "1"
+
+    def test_response_no_included_when_empty(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_many("articles")
+        def view(request) -> Response[list[Article]]:
+            return Response(
+                data=[Article(id=uuid.uuid4(), title="T", content="C")],
+                included=[],
+            )
+
+        request = factory.get("/articles/")
+        response = view(request)
+        body = json.loads(response.content)
+        assert "included" not in body
+
+    def test_included_with_relationship_links(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: int
+            name: str
+
+        class Book(Resource):
+            _type: ClassVar = "books"
+            _attributes: ClassVar = ["title"]
+            _singular_relationships: ClassVar = [("author", "authors")]
+            id: uuid.UUID
+            title: str
+            author: int
+
+        @api.get_one("authors")
+        def get_author(request, author_id: int) -> Author:
+            return Author(id=author_id, name="A")
+
+        @api.get_many("books")
+        def list_books(request) -> Response[list[Book]]:
+            return Response(
+                data=[Book(id=uuid.uuid4(), title="B", author=1)],
+                included=[Author(id=1, name="A")],
+            )
+
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get("/books/")
+            response = list_books(request)
+
+        body = json.loads(response.content)
+        # Included author should have links to its own relationships
+        included = body["included"][0]
+        assert included["type"] == "authors"
+        assert included["id"] == "1"
+        # Primary data should have relationship links
+        item = body["data"][0]
+        assert item["relationships"]["author"]["links"]["related"] == "/authors/1"
+
+    def test_response_on_get_one(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: int
+            name: str
+
+        @api.get_one("articles")
+        def view(request, article_id: uuid.UUID) -> Response[Article]:
+            return Response(
+                data=Article(id=article_id, title="T", content="C"),
+                included=[Author(id=1, name="A")],
+            )
+
+        uid = uuid.uuid4()
+        request = factory.get(f"/articles/{uid}")
+        response = view(request, article_id=uid)
+        body = json.loads(response.content)
+        assert "included" in body
+        assert len(body["included"]) == 1
 
 
 class TestExceptions:
@@ -890,3 +1028,32 @@ class TestExceptions:
         assert error["code"] == "not_found"
         assert error["title"] == "Not found"
         assert error["detail"] == "Custom detail"
+
+
+class TestStartupValidation:
+    def test_bare_include_param_errors(self):
+        from django.core.exceptions import ImproperlyConfigured
+
+        api = DjsonApi()
+        with pytest.raises(ImproperlyConfigured):
+
+            @api.get_many("articles")
+            def view(request, include: str = "") -> list[Article]: ...
+
+    def test_bare_include_param_on_get_one_errors(self):
+        from django.core.exceptions import ImproperlyConfigured
+
+        api = DjsonApi()
+        with pytest.raises(ImproperlyConfigured):
+
+            @api.get_one("articles")
+            def view(request, article_id: int, include: str = "") -> Article: ...
+
+    def test_bare_include_param_on_create_one_errors(self):
+        from django.core.exceptions import ImproperlyConfigured
+
+        api = DjsonApi()
+        with pytest.raises(ImproperlyConfigured):
+
+            @api.create_one("articles")
+            def view(request, payload: Article, include: str = "") -> Article: ...
