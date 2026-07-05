@@ -25,8 +25,10 @@ def get_article(request: HttpRequest, article_id: int) -> ArticleResource:
 
 
 @api.get_many("articles")
-def list_articles(request: HttpRequest) -> list[ArticleResource]:
+def list_articles(request: HttpRequest, filter__title__contains: str = "") -> list[ArticleResource]:
     articles = Article.objects.all()
+    if filter__title__contains:
+        articles = articles.filter(title__contains=filter__title__contains)
     return [
         ArticleResource(
             id=article.id,

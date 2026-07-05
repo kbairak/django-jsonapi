@@ -570,6 +570,308 @@ class TestGetMany:
             assert rel["links"]["related"].startswith("/authors/")
 
 
+class TestQueryParams:
+    def test_filter_str_param(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_many("articles")
+        def view(request, filter__title__contains: str = "") -> list[Article]:
+            return [
+                Article(id=uuid.uuid4(), title=title, content="c")
+                for title in ["Hello", "World"]
+            ]
+
+        request = factory.get("/articles/?filter[title][contains]=ello")
+        response = view(request)
+
+        assert response.status_code == 200
+
+    def test_filter_str_passed_to_handler(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.get_many("articles")
+        def view(request, filter__title: str = "") -> list[Article]:
+            calls.append(filter__title)
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        request = factory.get("/articles/?filter[title]=hello")
+        view(request)
+        assert calls == ["hello"]
+
+    def test_filter_str_default_when_missing(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.get_many("articles")
+        def view(request, filter__title: str = "default_val") -> list[Article]:
+            calls.append(filter__title)
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        request = factory.get("/articles/")
+        view(request)
+        assert calls == ["default_val"]
+
+    def test_int_param_conversion(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.get_many("articles")
+        def view(request, page__limit: int = 10) -> list[Article]:
+            calls.append(page__limit)
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        request = factory.get("/articles/?page[limit]=25")
+        view(request)
+        assert calls == [25]
+
+    def test_int_param_default(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.get_many("articles")
+        def view(request, page__limit: int = 10) -> list[Article]:
+            calls.append(page__limit)
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        request = factory.get("/articles/")
+        view(request)
+        assert calls == [10]
+
+    def test_bool_param_conversion(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.get_many("articles")
+        def view(request, include__author: bool = False) -> list[Article]:
+            calls.append(include__author)
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        request = factory.get("/articles/?include[author]=true")
+        view(request)
+        assert calls == [True]
+
+    def test_list_str_param(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.get_many("articles")
+        def view(request, sort: list[str] = []) -> list[Article]:
+            calls.append(sort)
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        request = factory.get("/articles/?sort=-created_at,title")
+        view(request)
+        assert calls == [["-created_at", "title"]]
+
+    def test_list_str_empty_default(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.get_many("articles")
+        def view(request, fields__articles: list[str] = []) -> list[Article]:
+            calls.append(fields__articles)
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        request = factory.get("/articles/")
+        view(request)
+        assert calls == [[]]
+
+    def test_required_param_missing_returns_400(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_many("articles")
+        def view(request, filter__q: str) -> list[Article]:
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        request = factory.get("/articles/")
+        response = view(request)
+        assert response.status_code == 400
+
+    def test_invalid_int_returns_400(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_many("articles")
+        def view(request, page__limit: int = 10) -> list[Article]:
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        request = factory.get("/articles/?page[limit]=abc")
+        response = view(request)
+        assert response.status_code == 400
+
+    def test_include_presence_based_bool(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.get_many("articles")
+        def view(request, include__author: bool = False) -> list[Article]:
+            calls.append(include__author)
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        request = factory.get("/articles/?include[author]=xyz")
+        view(request)
+        assert calls == [True]
+
+    def test_include_absent_uses_default(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.get_many("articles")
+        def view(request, include__author: bool = False) -> list[Article]:
+            calls.append(include__author)
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        request = factory.get("/articles/")
+        view(request)
+        assert calls == [False]
+
+    def test_query_params_applied_to_get_one(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.get_one("articles")
+        def view(request, article_id: uuid.UUID, filter__q: str = "") -> Article:
+            calls.append(filter__q)
+            return Article(id=article_id, title="T", content="C")
+
+        uid = uuid.uuid4()
+        request = factory.get(f"/articles/{uid}?filter[q]=test")
+        view(request, article_id=uid)
+        assert calls == ["test"]
+
+    def test_query_params_applied_to_create_one(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.create_one("articles")
+        def view(request: HttpRequest, payload: Article, filter__q: str = "") -> Article:
+            calls.append(filter__q)
+            return Article(id=uuid.uuid4(), title="T", content="C")
+
+        body = json.dumps({
+            "data": {"type": "articles", "attributes": {"title": "T", "content": "C"}}
+        })
+        request = factory.post("/articles/?filter[q]=hello", body, content_type="application/vnd.api+json")
+        view(request)
+        assert calls == ["hello"]
+
+    def test_openapi_spec_includes_query_params(self):
+        api = DjsonApi()
+
+        @api.get_many("articles")
+        def view(request, filter__q: str = "", page__limit: int = 10, sort: list[str] = []) -> list[Article]: ...
+
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles/"]["get"]
+        params = {p["name"]: p for p in op.get("parameters", [])}
+        assert "filter[q]" in params
+        assert params["filter[q]"]["in"] == "query"
+        assert params["filter[q]"]["schema"]["type"] == "string"
+        assert "page[limit]" in params
+        assert params["page[limit]"]["schema"]["type"] == "integer"
+        assert "sort" in params
+        assert params["sort"]["schema"]["type"] == "array"
+
+    def test_bare_filter_returns_400(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_many("articles")
+        def view(request, filter: str = "") -> list[Article]:
+            return []
+
+        request = factory.get("/articles/?filter=hello")
+        response = view(request)
+        assert response.status_code == 400
+
+    def test_nested_sort_returns_400(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_many("articles")
+        def view(request, sort__field: str = "") -> list[Article]:
+            return []
+
+        request = factory.get("/articles/?sort[field]=title")
+        response = view(request)
+        assert response.status_code == 400
+
+    def test_extra_strips_prefix(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.get_many("articles")
+        def view(request, extra__custom: str = "") -> list[Article]:
+            calls.append(extra__custom)
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        request = factory.get("/articles/?custom=hello")
+        view(request)
+        assert calls == ["hello"]
+
+    def test_fields_filtering_attributes(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_many("articles")
+        def view(request, fields__articles: list[str] = []) -> list[Article]:
+            uid = uuid.uuid4()
+            return [Article(id=uid, title="T", content="C")]
+
+        request = factory.get("/articles/?fields[articles]=title")
+        response = view(request)
+
+        body = json.loads(response.content)
+        item = body["data"][0]
+        assert "id" in item  # id always present
+        assert "title" in item["attributes"]
+        assert "content" not in item["attributes"]
+
+    def test_fields_filtering_not_applied_when_not_requested(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_many("articles")
+        def view(request, fields__articles: list[str] = []) -> list[Article]:
+            uid = uuid.uuid4()
+            return [Article(id=uid, title="T", content="C")]
+
+        request = factory.get("/articles/")
+        response = view(request)
+
+        body = json.loads(response.content)
+        item = body["data"][0]
+        assert "title" in item["attributes"]
+        assert "content" in item["attributes"]
+
+    def test_openapi_spec_include_params(self):
+        api = DjsonApi()
+
+        @api.get_many("articles")
+        def view(request, include__author: bool = False) -> list[Article]: ...
+
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles/"]["get"]
+        params = {p["name"]: p for p in op.get("parameters", [])}
+        assert "include[author]" in params
+        assert params["include[author]"]["schema"]["type"] == "boolean"
+
+
 class TestExceptions:
     def test_not_found_renders_correctly(self):
         api = DjsonApi()

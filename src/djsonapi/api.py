@@ -11,7 +11,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.urls import NoReverseMatch, path, reverse
 
 from .exceptions import DjsonApiException, InternalServerError
-from .resource import Resource
+from .resource import MISSING, Resource
 
 _PYTHON_TO_DJANGO_PATH = {
     uuid_type.UUID: "uuid",
@@ -26,6 +26,170 @@ _PYTHON_TO_OPENAPI = {
     float: "number",
     bool: "boolean",
 }
+
+
+_QUERY_PARAM_FAMILIES: dict = {
+    "filter": {"flat": False, "nested": True, "strip": False},
+    "page": {"flat": True, "nested": True, "strip": False},
+    "sort": {"flat": True, "nested": False, "strip": False},
+    "include": {"flat": False, "nested": True, "strip": False, "bool_by_presence": True},
+    "fields": {"flat": False, "nested": True, "strip": False},
+    "extra": {"flat": False, "nested": True, "strip": True},
+}
+
+_MUTABLE_DEFAULT = object()
+
+
+def _query_param_name(key: str) -> str:
+    parts = key.split("__")
+    prefix = parts[0]
+    family = _QUERY_PARAM_FAMILIES.get(prefix)
+    if family and family.get("strip"):
+        return "__".join(parts[1:])
+    result = parts[0]
+    for part in parts[1:]:
+        result += f"[{part}]"
+    return result
+
+
+def _validate_and_convert(raw: str, tp: type, query_name: str) -> Any:
+    origin = get_origin(tp)
+    if origin is list:
+        args = get_args(tp)
+        item_tp = args[0] if args else str
+        if not raw.strip():
+            return []
+        return [  # type: ignore[return-value]
+            _validate_and_convert(item.strip(), item_tp, query_name) for item in raw.split(",")
+        ]
+    if tp is int:
+        return int(raw)
+    if tp is float:
+        return float(raw)
+    if tp is bool:
+        if raw.lower() in ("true", "1"):
+            return True
+        if raw.lower() in ("false", "0"):
+            return False
+        raise ValueError(f"Invalid boolean value for '{query_name}': '{raw}'")
+    return raw
+
+
+def _extract_fields(query_params: dict) -> dict | None:
+    fields = {}
+    for k, v in query_params.items():
+        if k.startswith("fields__"):
+            type_name = k.split("__", 1)[1]
+            fields[type_name] = v
+    return fields if fields else None
+
+
+def _extract_query_params(handler: Callable, request: HttpRequest, exclude: frozenset = frozenset()) -> dict:
+    sig = inspect.signature(handler)
+    result: dict = {}
+    for name, param in sig.parameters.items():
+        if name == "request":
+            continue
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            continue
+        if name in exclude:
+            continue
+        annotation = param.annotation if param.annotation != inspect.Parameter.empty else str
+        if isinstance(annotation, type) and issubclass(annotation, Resource):
+            continue
+        parts = name.split("__")
+        prefix = parts[0]
+        family = _QUERY_PARAM_FAMILIES.get(prefix)
+        if not family:
+            continue
+        is_flat = len(parts) == 1
+        if is_flat and not family.get("flat", False):
+            raise ValueError(f"'{prefix}' requires sub-parameters (e.g., '{prefix}__xxx')")
+        if not is_flat and not family.get("nested", False):
+            raise ValueError(f"'{prefix}' does not accept sub-parameters")
+        default = param.default if param.default != inspect.Parameter.empty else _MUTABLE_DEFAULT
+        query_name = _query_param_name(name)
+        bool_by_presence = family.get("bool_by_presence", False) and annotation is bool
+        if bool_by_presence:
+            if query_name in request.GET:
+                result[name] = True
+            elif default is not _MUTABLE_DEFAULT:
+                result[name] = default
+            else:
+                raise ValueError(f"Missing required query parameter: {query_name}")
+            continue
+        raw = request.GET.get(query_name)
+        if raw is None:
+            if default is _MUTABLE_DEFAULT:
+                raise ValueError(f"Missing required query parameter: {query_name}")
+            result[name] = default
+            continue
+        result[name] = _validate_and_convert(raw, annotation, query_name)
+    return result
+
+
+def _type_to_openapi_schema(tp: type) -> dict:
+    origin = get_origin(tp)
+    args = get_args(tp)
+    if origin is list:
+        item_tp = args[0] if args else str
+        return {"type": "array", "items": _type_to_openapi_schema(item_tp)}
+    openapi_type = _PYTHON_TO_OPENAPI.get(tp, "string")
+    result: dict = {"type": openapi_type}
+    if tp is uuid_type.UUID:
+        result["format"] = "uuid"
+    return result
+
+
+def _handler_query_params(handler: Callable) -> list[dict]:
+    sig = inspect.signature(handler)
+    params = []
+    for name, param in sig.parameters.items():
+        if name == "request":
+            continue
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            continue
+        annotation = param.annotation if param.annotation != inspect.Parameter.empty else str
+        if isinstance(annotation, type) and issubclass(annotation, Resource):
+            continue
+        parts = name.split("__")
+        prefix = parts[0]
+        family = _QUERY_PARAM_FAMILIES.get(prefix)
+        if not family:
+            continue
+        is_flat = len(parts) == 1
+        if is_flat and not family.get("flat", False):
+            continue
+        if not is_flat and not family.get("nested", False):
+            continue
+        has_default = param.default is not inspect.Parameter.empty
+        query_name = _query_param_name(name)
+        if family.get("bool_by_presence", False) and annotation is bool:
+            param_obj = {
+                "name": query_name,
+                "in": "query",
+                "required": False,
+                "schema": {"type": "boolean"},
+            }
+        else:
+            param_obj = {
+                "name": query_name,
+                "in": "query",
+                "required": not has_default,
+                "schema": _type_to_openapi_schema(annotation),
+            }
+            if has_default and param.default is not None:
+                default = param.default
+                if isinstance(default, (str, int, float, bool)):
+                    param_obj["schema"]["default"] = default
+        params.append(param_obj)
+    return params
+
+
+def _add_query_params_to_op(handler: Callable, op: dict) -> None:
+    query_params = _handler_query_params(inspect.unwrap(handler))
+    if query_params:
+        op.setdefault("parameters", []).extend(query_params)
 
 
 class DjsonApi:
@@ -58,7 +222,14 @@ class DjsonApi:
 
                 async def async_wrapper(request, **kwargs) -> JsonResponse:
                     try:
-                        result = await handler(request, **kwargs)
+                        query_params = _extract_query_params(handler, request, exclude=frozenset(kwargs.keys()))
+                    except ValueError as exc:
+                        return JsonResponse(
+                            {"errors": [{"status": "400", "title": "Bad request", "detail": str(exc)}]},
+                            status=400,
+                        )
+                    try:
+                        result = await handler(request, **query_params, **kwargs)
                     except DjsonApiException as exc:
                         return JsonResponse(
                             {"errors": exc.render()},
@@ -72,18 +243,26 @@ class DjsonApi:
                             status=ise.status,
                             content_type="application/vnd.api+json",
                         )
-                    return _one_response(result, url_name, kwargs, self._type_to_endpoint())
+                    return _one_response(result, url_name, kwargs, self._type_to_endpoint(), fields=_extract_fields(query_params))
 
                 async_wrapper.__name__ = handler.__name__
                 async_wrapper.__qualname__ = handler.__qualname__
                 async_wrapper.__module__ = handler.__module__
                 async_wrapper.__doc__ = handler.__doc__
+                async_wrapper.__wrapped__ = handler
                 wrapper = async_wrapper
             else:
 
                 def sync_wrapper(request, **kwargs) -> JsonResponse:
                     try:
-                        result = handler(request, **kwargs)
+                        query_params = _extract_query_params(handler, request, exclude=frozenset(kwargs.keys()))
+                    except ValueError as exc:
+                        return JsonResponse(
+                            {"errors": [{"status": "400", "title": "Bad request", "detail": str(exc)}]},
+                            status=400,
+                        )
+                    try:
+                        result = handler(request, **query_params, **kwargs)
                     except DjsonApiException as exc:
                         return JsonResponse(
                             {"errors": exc.render()},
@@ -97,12 +276,13 @@ class DjsonApi:
                             status=ise.status,
                             content_type="application/vnd.api+json",
                         )
-                    return _one_response(result, url_name, kwargs, self._type_to_endpoint())
+                    return _one_response(result, url_name, kwargs, self._type_to_endpoint(), fields=_extract_fields(query_params))
 
                 sync_wrapper.__name__ = handler.__name__
                 sync_wrapper.__qualname__ = handler.__qualname__
                 sync_wrapper.__module__ = handler.__module__
                 sync_wrapper.__doc__ = handler.__doc__
+                sync_wrapper.__wrapped__ = handler
                 wrapper = sync_wrapper
 
             self._registry.append(
@@ -137,7 +317,14 @@ class DjsonApi:
 
                 async def async_wrapper(request, **kwargs) -> JsonResponse:
                     try:
-                        result = await handler(request, **kwargs)
+                        query_params = _extract_query_params(handler, request, exclude=frozenset(kwargs.keys()))
+                    except ValueError as exc:
+                        return JsonResponse(
+                            {"errors": [{"status": "400", "title": "Bad request", "detail": str(exc)}]},
+                            status=400,
+                        )
+                    try:
+                        result = await handler(request, **query_params)
                     except DjsonApiException as exc:
                         return JsonResponse(
                             {"errors": exc.render()},
@@ -151,18 +338,26 @@ class DjsonApi:
                             status=ise.status,
                             content_type="application/vnd.api+json",
                         )
-                    return _many_response(result, url_name, self._type_to_endpoint())
+                    return _many_response(result, url_name, self._type_to_endpoint(), fields=_extract_fields(query_params))
 
                 async_wrapper.__name__ = handler.__name__
                 async_wrapper.__qualname__ = handler.__qualname__
                 async_wrapper.__module__ = handler.__module__
                 async_wrapper.__doc__ = handler.__doc__
+                async_wrapper.__wrapped__ = handler
                 wrapper = async_wrapper
             else:
 
                 def sync_wrapper(request, **kwargs) -> JsonResponse:
                     try:
-                        result = handler(request, **kwargs)
+                        query_params = _extract_query_params(handler, request, exclude=frozenset(kwargs.keys()))
+                    except ValueError as exc:
+                        return JsonResponse(
+                            {"errors": [{"status": "400", "title": "Bad request", "detail": str(exc)}]},
+                            status=400,
+                        )
+                    try:
+                        result = handler(request, **query_params)
                     except DjsonApiException as exc:
                         return JsonResponse(
                             {"errors": exc.render()},
@@ -176,12 +371,13 @@ class DjsonApi:
                             status=ise.status,
                             content_type="application/vnd.api+json",
                         )
-                    return _many_response(result, url_name, self._type_to_endpoint())
+                    return _many_response(result, url_name, self._type_to_endpoint(), fields=_extract_fields(query_params))
 
                 sync_wrapper.__name__ = handler.__name__
                 sync_wrapper.__qualname__ = handler.__qualname__
                 sync_wrapper.__module__ = handler.__module__
                 sync_wrapper.__doc__ = handler.__doc__
+                sync_wrapper.__wrapped__ = handler
                 wrapper = sync_wrapper
 
             self._registry.append(
@@ -214,11 +410,18 @@ class DjsonApi:
 
                 async def async_wrapper(request, **kwargs) -> JsonResponse:
                     try:
+                        query_params = _extract_query_params(handler, request, exclude=frozenset(kwargs.keys()))
+                    except ValueError as exc:
+                        return JsonResponse(
+                            {"errors": [{"status": "400", "title": "Bad request", "detail": str(exc)}]},
+                            status=400,
+                        )
+                    try:
                         body = json_module.loads(request.body)
                         data = body.get("data", {})
                         jsonschema.validate(data, resource_class.jsonschema_create())
                         payload = resource_class._from_jsonapi_payload(body)
-                        result = await handler(request, payload=payload)
+                        result = await handler(request, payload=payload, **query_params)
                         return _create_response(result, type_name, self._type_to_endpoint())
                     except json_module.JSONDecodeError as exc:
                         return JsonResponse(
@@ -253,16 +456,24 @@ class DjsonApi:
                 async_wrapper.__qualname__ = handler.__qualname__
                 async_wrapper.__module__ = handler.__module__
                 async_wrapper.__doc__ = handler.__doc__
+                async_wrapper.__wrapped__ = handler
                 wrapper = async_wrapper
             else:
 
                 def sync_wrapper(request, **kwargs) -> JsonResponse:
                     try:
+                        query_params = _extract_query_params(handler, request, exclude=frozenset(kwargs.keys()))
+                    except ValueError as exc:
+                        return JsonResponse(
+                            {"errors": [{"status": "400", "title": "Bad request", "detail": str(exc)}]},
+                            status=400,
+                        )
+                    try:
                         body = json_module.loads(request.body)
                         data = body.get("data", {})
                         jsonschema.validate(data, resource_class.jsonschema_create())
                         payload = resource_class._from_jsonapi_payload(body)
-                        result = handler(request, payload=payload)
+                        result = handler(request, payload=payload, **query_params)
                         return _create_response(result, type_name, self._type_to_endpoint())
                     except json_module.JSONDecodeError as exc:
                         return JsonResponse(
@@ -297,6 +508,7 @@ class DjsonApi:
                 sync_wrapper.__qualname__ = handler.__qualname__
                 sync_wrapper.__module__ = handler.__module__
                 sync_wrapper.__doc__ = handler.__doc__
+                sync_wrapper.__wrapped__ = handler
                 wrapper = sync_wrapper
 
             self._registry.append(
@@ -430,9 +642,10 @@ class DjsonApi:
                                 }
                             },
                         }
-                    },
-}
- 
+},
+                }
+                _add_query_params_to_op(entry["handler"], path_item["get"])
+
             elif entry["method"] == "get_many":
                 path_str = f"/{type_name}/"
                 path_item = spec["paths"].setdefault(path_str, {})
@@ -453,6 +666,7 @@ class DjsonApi:
                         }
                     },
                 }
+                _add_query_params_to_op(entry["handler"], path_item["get"])
 
             elif entry["method"] == "create_one":
                 path_str = f"/{type_name}/"
@@ -486,6 +700,7 @@ class DjsonApi:
                         },
                     },
                 }
+                _add_query_params_to_op(entry["handler"], path_item["post"])
         return spec
 
 
@@ -506,8 +721,19 @@ def _add_relationship_links(resource, type_to_endpoint):
                     pass
 
 
-def _one_response(result, url_name, kwargs, type_to_endpoint):
+def _apply_fields(resource, fields_for_type):
+    if not fields_for_type:
+        return
+    if "attributes" in resource:
+        resource["attributes"] = {k: v for k, v in resource["attributes"].items() if k in fields_for_type}
+    if "relationships" in resource:
+        resource["relationships"] = {k: v for k, v in resource["relationships"].items() if k in fields_for_type}
+
+
+def _one_response(result, url_name, kwargs, type_to_endpoint, fields=None):
     resource = result.serialize()
+    if fields:
+        _apply_fields(resource, fields.get(result._type))
     try:
         self_url = reverse(url_name, kwargs=kwargs)
         resource.setdefault("links", {})["self"] = self_url
@@ -521,10 +747,12 @@ def _one_response(result, url_name, kwargs, type_to_endpoint):
     return JsonResponse(body, content_type="application/vnd.api+json")
 
 
-def _many_response(result_list, url_name, type_to_endpoint):
+def _many_response(result_list, url_name, type_to_endpoint, fields=None):
     resources = []
     for result in result_list:
         resource = result.serialize()
+        if fields:
+            _apply_fields(resource, fields.get(result._type))
         _add_relationship_links(resource, type_to_endpoint)
         resources.append(resource)
 
