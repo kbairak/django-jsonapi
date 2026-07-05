@@ -1,7 +1,7 @@
 from django.http import HttpRequest
 
 from djsonapi import DjsonApi, Response
-from djsonapi.exceptions import NotFound, Conflict
+from djsonapi.exceptions import Conflict, NotFound
 
 from .models import Article, User
 from .resources import ArticleResource, UserResource
@@ -26,15 +26,23 @@ def get_article(request: HttpRequest, article_id: int) -> ArticleResource:
 
 @api.get_many("articles")
 def list_articles(
-    request: HttpRequest, filter__title__contains: str = "", include__author=False
+    request: HttpRequest, filter__title__contains: str = "", include__author=False, page: int = 1
 ) -> Response[list[ArticleResource]]:
-    qs = Article.objects.all()
+    qs = Article.objects.order_by("id")
     if filter__title__contains:
         qs = qs.filter(title__contains=filter__title__contains)
     if include__author:
         qs = qs.select_related("author")
     articles = list[ArticleResource]()
     users = set[UserResource]()
+
+    page_size = 10
+    offset = (page - 1) * page_size
+    qs = qs[offset : offset + page_size]
+    links: dict[str, dict[str, str | int]] = {"next": {"page": page + 1}}
+    if page > 1:
+        links["prev"] = {"page": page - 1}
+
     for article in qs:
         articles.append(
             ArticleResource(
@@ -56,6 +64,7 @@ def list_articles(
     return Response(
         data=articles,
         included=list(users) if include__author else None,
+        links=links,
     )
 
 
@@ -74,7 +83,9 @@ def create_article(request: HttpRequest, payload: ArticleResource) -> ArticleRes
 
 
 @api.edit_one("articles", errors=[NotFound, Conflict])
-def edit_article(request: HttpRequest, article_id: int, payload: ArticleResource) -> ArticleResource:
+def edit_article(
+    request: HttpRequest, article_id: int, payload: ArticleResource
+) -> ArticleResource:
     try:
         article = Article.objects.get(id=article_id)
     except Article.DoesNotExist:

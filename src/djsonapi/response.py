@@ -8,4 +8,5 @@ from .resource import Resource
 class Response[T]:
     data: T | None = None
     included: Sequence[Resource] | None = None
+    links: dict[str, dict[str, str | int]] | None = None
 

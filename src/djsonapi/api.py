@@ -6,6 +6,7 @@ import types
 import uuid as uuid_type
 from collections.abc import Callable
 from typing import Any, Union, get_args, get_origin
+from urllib.parse import urlencode
 
 import jsonschema
 from django.core.exceptions import ImproperlyConfigured
@@ -250,8 +251,20 @@ def _build_relationship_schema(rel_id_type: type, is_plural: bool) -> dict:
 
 def _unwrap_response(raw):
     if isinstance(raw, Response):
-        return raw.data, list(raw.included) if raw.included else None
-    return raw, None
+        return raw.data, list(raw.included) if raw.included else None, raw.links
+    return raw, None, None
+
+
+def _build_links(request, link_defs):
+    if not link_defs:
+        return {}
+    base = dict(request.GET.items())
+    result = {}
+    for rel, params in link_defs.items():
+        merged = {**base, **params}
+        qs = urlencode(merged, doseq=True)
+        result[rel] = f"{request.path}?{qs}" if qs else request.path
+    return result
 
 
 def _validate_handler_params(handler: Callable, exclude: frozenset = frozenset()) -> None:
@@ -329,14 +342,18 @@ class DjsonApi:
                             status=ise.status,
                             content_type="application/vnd.api+json",
                         )
+                    raw, included, resp_links = _unwrap_response(result)
+                    extra_links = _build_links(request, resp_links)
                     return _one_response(
-                        result,
+                        raw,
                         url_name,
                         kwargs,
                         self._type_to_endpoint(),
                         rel_to_endpoint=self._rel_to_endpoint(),
                         rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
                         fields=_extract_fields(query_params),
+                        included=included,
+                        extra_links=extra_links,
                     )
 
                 wrapper = functools.update_wrapper(
@@ -376,7 +393,8 @@ class DjsonApi:
                             status=ise.status,
                             content_type="application/vnd.api+json",
                         )
-                    raw, included = _unwrap_response(result)
+                    raw, included, resp_links = _unwrap_response(result)
+                    extra_links = _build_links(request, resp_links)
                     return _one_response(
                         raw,
                         url_name,
@@ -386,6 +404,7 @@ class DjsonApi:
                         rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
                         fields=_extract_fields(query_params),
                         included=included,
+                        extra_links=extra_links,
                     )
 
                 wrapper = functools.update_wrapper(
@@ -458,13 +477,17 @@ class DjsonApi:
                             status=ise.status,
                             content_type="application/vnd.api+json",
                         )
+                    raw, included, resp_links = _unwrap_response(result)
+                    extra_links = _build_links(request, resp_links)
                     return _many_response(
-                        result,
+                        raw,
                         url_name,
                         self._type_to_endpoint(),
                         rel_to_endpoint=self._rel_to_endpoint(),
                         rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
                         fields=_extract_fields(query_params),
+                        included=included,
+                        extra_links=extra_links,
                     )
 
                 wrapper = functools.update_wrapper(
@@ -504,7 +527,8 @@ class DjsonApi:
                             status=ise.status,
                             content_type="application/vnd.api+json",
                         )
-                    raw, included = _unwrap_response(result)
+                    raw, included, resp_links = _unwrap_response(result)
+                    extra_links = _build_links(request, resp_links)
                     return _many_response(
                         raw,
                         url_name,
@@ -513,6 +537,7 @@ class DjsonApi:
                         rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
                         fields=_extract_fields(query_params),
                         included=included,
+                        extra_links=extra_links,
                     )
 
                 wrapper = functools.update_wrapper(
@@ -575,9 +600,10 @@ class DjsonApi:
                         jsonschema.validate(data, resource_class.jsonschema_create())
                         payload = resource_class._from_jsonapi_payload(body)
                         result = await handler(request, payload=payload, **query_params)
-                        raw, included = _unwrap_response(result)
+                        raw, included, resp_links = _unwrap_response(result)
+                        extra_links = _build_links(request, resp_links)
                         return _create_response(
-                            raw, type_name, self._type_to_endpoint(), rel_to_endpoint=self._rel_to_endpoint(), rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(), included=included
+                            raw, type_name, self._type_to_endpoint(), rel_to_endpoint=self._rel_to_endpoint(), rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(), included=included, extra_links=extra_links
                         )
                     except json_module.JSONDecodeError as exc:
                         return JsonResponse(
@@ -637,9 +663,10 @@ class DjsonApi:
                         jsonschema.validate(data, resource_class.jsonschema_create())
                         payload = resource_class._from_jsonapi_payload(body)
                         result = handler(request, payload=payload, **query_params)
-                        raw, included = _unwrap_response(result)
+                        raw, included, resp_links = _unwrap_response(result)
+                        extra_links = _build_links(request, resp_links)
                         return _create_response(
-                            raw, type_name, self._type_to_endpoint(), rel_to_endpoint=self._rel_to_endpoint(), rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(), included=included
+                            raw, type_name, self._type_to_endpoint(), rel_to_endpoint=self._rel_to_endpoint(), rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(), included=included, extra_links=extra_links
                         )
                     except json_module.JSONDecodeError as exc:
                         return JsonResponse(
@@ -732,16 +759,18 @@ class DjsonApi:
                         jsonschema.validate(data, resource_class.jsonschema_edit())
                         payload = resource_class._from_jsonapi_payload(body, fields=resource_class._edit_fields)
                         result = await handler(request, payload=payload, **query_params, **kwargs)
-                        raw, included = _unwrap_response(result)
+                        raw, included, resp_links = _unwrap_response(result)
+                        extra_links = _build_links(request, resp_links)
                         return _one_response(
                             raw,
                             url_name,
                             kwargs,
                             self._type_to_endpoint(),
                             rel_to_endpoint=self._rel_to_endpoint(),
-                        rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
+                            rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
                             fields=_extract_fields(query_params),
                             included=included,
+                            extra_links=extra_links,
                         )
                     except json_module.JSONDecodeError as exc:
                         return JsonResponse(
@@ -801,16 +830,18 @@ class DjsonApi:
                         jsonschema.validate(data, resource_class.jsonschema_edit())
                         payload = resource_class._from_jsonapi_payload(body, fields=resource_class._edit_fields)
                         result = handler(request, payload=payload, **query_params, **kwargs)
-                        raw, included = _unwrap_response(result)
+                        raw, included, resp_links = _unwrap_response(result)
+                        extra_links = _build_links(request, resp_links)
                         return _one_response(
                             raw,
                             url_name,
                             kwargs,
                             self._type_to_endpoint(),
                             rel_to_endpoint=self._rel_to_endpoint(),
-                        rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
+                            rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
                             fields=_extract_fields(query_params),
                             included=included,
+                            extra_links=extra_links,
                         )
                     except json_module.JSONDecodeError as exc:
                         return JsonResponse(
@@ -1197,7 +1228,8 @@ class DjsonApi:
                             status=ise.status,
                             content_type="application/vnd.api+json",
                         )
-                    raw, included = _unwrap_response(result)
+                    raw, included, resp_links = _unwrap_response(result)
+                    extra_links = _build_links(request, resp_links)
                     rel = self._rel_to_endpoint()
                     rel_mgmt = self._rel_mgmt_to_endpoint()
                     if is_plural:
@@ -1210,6 +1242,7 @@ class DjsonApi:
                             fields=_extract_fields(query_params),
                             included=included,
                             url_kwargs=kwargs,
+                            extra_links=extra_links,
                         )
                     return _one_response(
                         raw,
@@ -1220,6 +1253,7 @@ class DjsonApi:
                         rel_mgmt_to_endpoint=rel_mgmt,
                         fields=_extract_fields(query_params),
                         included=included,
+                        extra_links=extra_links,
                     )
 
                 wrapper = functools.update_wrapper(
@@ -1259,7 +1293,8 @@ class DjsonApi:
                             status=ise.status,
                             content_type="application/vnd.api+json",
                         )
-                    raw, included = _unwrap_response(result)
+                    raw, included, resp_links = _unwrap_response(result)
+                    extra_links = _build_links(request, resp_links)
                     rel = self._rel_to_endpoint()
                     rel_mgmt = self._rel_mgmt_to_endpoint()
                     if is_plural:
@@ -1272,6 +1307,7 @@ class DjsonApi:
                             fields=_extract_fields(query_params),
                             included=included,
                             url_kwargs=kwargs,
+                            extra_links=extra_links,
                         )
                     return _one_response(
                         raw,
@@ -1282,6 +1318,7 @@ class DjsonApi:
                         rel_mgmt_to_endpoint=rel_mgmt,
                         fields=_extract_fields(query_params),
                         included=included,
+                        extra_links=extra_links,
                     )
 
                 wrapper = functools.update_wrapper(
@@ -1850,7 +1887,7 @@ def _serialize_resource(result, type_to_endpoint, fields, rel_to_endpoint=None, 
     return resource
 
 
-def _one_response(result, url_name, kwargs, type_to_endpoint, fields=None, included=None, rel_to_endpoint=None, rel_mgmt_to_endpoint=None):
+def _one_response(result, url_name, kwargs, type_to_endpoint, fields=None, included=None, rel_to_endpoint=None, rel_mgmt_to_endpoint=None, extra_links=None):
     resource = _serialize_resource(result, type_to_endpoint, fields, rel_to_endpoint=rel_to_endpoint, rel_mgmt_to_endpoint=rel_mgmt_to_endpoint)
     try:
         self_url = reverse(url_name, kwargs=kwargs)
@@ -1858,6 +1895,8 @@ def _one_response(result, url_name, kwargs, type_to_endpoint, fields=None, inclu
         links = {"self": self_url}
     except (NoReverseMatch, ImproperlyConfigured):
         links = {}
+    if extra_links:
+        links = {**extra_links, **links}
 
     body: dict = {"data": resource, "links": links, "jsonapi": {"version": "1.0"}}
     if included:
@@ -1865,7 +1904,7 @@ def _one_response(result, url_name, kwargs, type_to_endpoint, fields=None, inclu
     return JsonResponse(body, content_type="application/vnd.api+json")
 
 
-def _many_response(result_list, url_name, type_to_endpoint, fields=None, included=None, rel_to_endpoint=None, rel_mgmt_to_endpoint=None, url_kwargs=None):
+def _many_response(result_list, url_name, type_to_endpoint, fields=None, included=None, rel_to_endpoint=None, rel_mgmt_to_endpoint=None, url_kwargs=None, extra_links=None):
     resources = [_serialize_resource(r, type_to_endpoint, fields, rel_to_endpoint=rel_to_endpoint, rel_mgmt_to_endpoint=rel_mgmt_to_endpoint) for r in result_list]
     try:
         if url_kwargs:
@@ -1875,6 +1914,8 @@ def _many_response(result_list, url_name, type_to_endpoint, fields=None, include
         links = {"self": self_url}
     except (NoReverseMatch, ImproperlyConfigured):
         links = {}
+    if extra_links:
+        links = {**extra_links, **links}
 
     body: dict = {"data": resources, "links": links, "jsonapi": {"version": "1.0"}}
     if included:
@@ -1972,9 +2013,12 @@ class _CombinedView:
         return handler(request, **kwargs)
 
 
-def _create_response(result, type_name, type_to_endpoint, fields=None, included=None, rel_to_endpoint=None, rel_mgmt_to_endpoint=None):
+def _create_response(result, type_name, type_to_endpoint, fields=None, included=None, rel_to_endpoint=None, rel_mgmt_to_endpoint=None, extra_links=None):
     if result is None:
-        return JsonResponse({"jsonapi": {"version": "1.0"}}, status=202)
+        body = {"jsonapi": {"version": "1.0"}}
+        if extra_links:
+            body["links"] = extra_links
+        return JsonResponse(body, status=202)
 
     resource = _serialize_resource(result, type_to_endpoint, fields, rel_to_endpoint=rel_to_endpoint, rel_mgmt_to_endpoint=rel_mgmt_to_endpoint)
 
@@ -1992,6 +2036,8 @@ def _create_response(result, type_name, type_to_endpoint, fields=None, included=
                 pass
 
     body: dict = {"data": resource, "jsonapi": {"version": "1.0"}}
+    if extra_links:
+        body["links"] = extra_links
     if included:
         body["included"] = [_serialize_resource(r, type_to_endpoint, fields, rel_to_endpoint=rel_to_endpoint, rel_mgmt_to_endpoint=rel_mgmt_to_endpoint) for r in included]
     response = JsonResponse(body, status=201, content_type="application/vnd.api+json")

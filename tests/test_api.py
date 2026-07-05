@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sys
 import types
@@ -2018,6 +2019,147 @@ class TestResponse:
         body = json.loads(response.content)
         assert "included" in body
         assert len(body["included"]) == 1
+
+
+class TestPaginationLinks:
+    def test_many_response_includes_merged_links(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_many("articles")
+        def view(request) -> Response[list[Article]]:
+            return Response(
+                data=[Article(id=uuid.uuid4(), title="T", content="C")],
+                links={"prev": {"page": 1}, "next": {"page": 3}},
+            )
+
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get("/articles/?page=2")
+            response = view(request)
+        body = json.loads(response.content)
+
+        assert body["links"]["self"] == "/articles/"
+        assert body["links"]["prev"] == "/articles/?page=1"
+        assert body["links"]["next"] == "/articles/?page=3"
+
+    def test_many_response_merges_with_existing_query_params(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_many("articles")
+        def view(request) -> Response[list[Article]]:
+            return Response(
+                data=[Article(id=uuid.uuid4(), title="T", content="C")],
+                links={"prev": {"page": 1, "sort": "-title"}},
+            )
+
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get("/articles/?page=2&sort=title")
+            response = view(request)
+        body = json.loads(response.content)
+
+        assert "prev" in body["links"]
+        assert "page=1" in body["links"]["prev"]
+        assert "sort=-title" in body["links"]["prev"]
+
+    def test_one_response_includes_links(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_one("articles")
+        def view(request, article_id: uuid.UUID) -> Response[Article]:
+            return Response(
+                data=Article(id=article_id, title="T", content="C"),
+                links={"prev": {"page": 1}},
+            )
+
+        uid = uuid.uuid4()
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get(f"/articles/{uid}?page=2")
+            response = view(request, article_id=uid)
+        body = json.loads(response.content)
+
+        assert body["links"]["self"] == f"/articles/{uid}"
+        assert body["links"]["prev"] == f"/articles/{uid}?page=1"
+
+    def test_no_extra_links_when_response_has_none(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_many("articles")
+        def view(request) -> list[Article]:
+            return [Article(id=uuid.uuid4(), title="T", content="C")]
+
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get("/articles/")
+            response = view(request)
+        body = json.loads(response.content)
+
+        assert body["links"] == {"self": "/articles/"}
+
+    def test_empty_link_defs_keeps_self_link(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_many("articles")
+        def view(request) -> Response[list[Article]]:
+            return Response(
+                data=[Article(id=uuid.uuid4(), title="T", content="C")],
+                links={},
+            )
+
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get("/articles/")
+            response = view(request)
+        body = json.loads(response.content)
+
+        assert body["links"] == {"self": "/articles/"}
+
+    def test_async_get_many_pagination_links(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_many("articles")
+        async def view(request) -> Response[list[Article]]:
+            return Response(
+                data=[Article(id=uuid.uuid4(), title="T", content="C")],
+                links={"next": {"page": 2}},
+            )
+
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get("/articles/?page=1")
+            response = asyncio.run(view(request))
+        body = json.loads(response.content)
+
+        assert body["links"]["self"] == "/articles/"
+        assert body["links"]["next"] == "/articles/?page=2"
+
+    def test_async_get_one_pagination_links(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_one("articles")
+        async def view(request, article_id: uuid.UUID) -> Response[Article]:
+            return Response(
+                data=Article(id=article_id, title="T", content="C"),
+                links={"prev": {"page": 1}},
+            )
+
+        uid = uuid.uuid4()
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get(f"/articles/{uid}?page=2")
+            response = asyncio.run(view(request, article_id=uid))
+        body = json.loads(response.content)
+
+        assert body["links"]["self"] == f"/articles/{uid}"
+        assert body["links"]["prev"] == f"/articles/{uid}?page=1"
 
 
 class TestExceptions:

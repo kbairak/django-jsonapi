@@ -63,6 +63,6 @@ def list_articles(request: HttpRequest) -> list[ArticleResource]:
 - [x] Sparse fieldsets (`fields[type]=...`)
 - [x] Sorting (`sort=...`)
 - [x] Error responses in the openapi spec
-- [ ] Pagination (for get_many)
+- [x] Pagination (for get_many)
 - [ ] Mapping `/articles?filter[author]=...` to related resource URL
 - [ ] Authentication
