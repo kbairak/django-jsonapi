@@ -281,6 +281,398 @@ class TestCreateOne:
         assert body["data"]["id"] == str(client_id)
 
 
+class TestEditOne:
+    def test_edit_one_url(self):
+        api = DjsonApi()
+
+        @api.edit_one("articles")
+        def view(request: HttpRequest, article_id: uuid.UUID, payload: Article) -> Article: ...
+
+        urls = api.urls
+        assert any(u.name == "edit_one__articles" for u in urls)
+
+    def test_handler_called_with_correct_args(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        calls = []
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _edit_fields: ClassVar = ["id", "title", "content"]
+            id: uuid.UUID
+            title: str
+            content: str
+
+        @api.edit_one("articles")
+        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
+            calls.append((request, article_id, payload))
+            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
+
+        uid = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "id": str(uid),
+                "attributes": {"title": "Updated", "content": "Changed"},
+            }
+        })
+        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+        view(request, article_id=uid)
+
+        assert len(calls) == 1
+        req, pk, payload = calls[0]
+        assert pk == uid
+        assert payload.id == uid
+        assert payload.title == "Updated"
+        assert payload.content == "Changed"
+
+    def test_200_response_structure(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _edit_fields: ClassVar = ["id", "title", "content"]
+            id: uuid.UUID
+            title: str
+            content: str
+
+        @api.edit_one("articles")
+        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
+            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
+
+        uid = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "id": str(uid),
+                "attributes": {"title": "Updated", "content": "Changed"},
+            }
+        })
+        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+        response = view(request, article_id=uid)
+
+        assert response.status_code == 200
+        assert response["Content-Type"] == "application/vnd.api+json"
+        resp_data = json.loads(response.content)
+        assert resp_data["data"]["type"] == "articles"
+        assert resp_data["data"]["id"] == str(uid)
+        assert resp_data["data"]["attributes"]["title"] == "Updated"
+        assert resp_data["data"]["attributes"]["content"] == "Changed"
+
+    def test_400_on_missing_id(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _edit_fields: ClassVar = ["id", "title", "content"]
+            id: uuid.UUID
+            title: str
+            content: str
+
+        @api.edit_one("articles")
+        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
+            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
+
+        uid = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "attributes": {"title": "Updated"},
+            }
+        })
+        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+        response = view(request, article_id=uid)
+
+        assert response.status_code == 400
+        resp_data = json.loads(response.content)
+        assert "errors" in resp_data
+
+    def test_400_on_invalid_json(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _edit_fields: ClassVar = ["id", "title", "content"]
+            id: uuid.UUID
+            title: str
+            content: str
+
+        @api.edit_one("articles")
+        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
+            return EditableArticle(id=article_id, title="T", content="C")
+
+        uid = uuid.uuid4()
+        request = factory.patch(f"/articles/{uid}", "not json", content_type="application/vnd.api+json")
+        response = view(request, article_id=uid)
+
+        assert response.status_code == 400
+
+    def test_500_on_unhandled_exception(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _edit_fields: ClassVar = ["id", "title", "content"]
+            id: uuid.UUID
+            title: str
+            content: str
+
+        @api.edit_one("articles")
+        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
+            raise ValueError("something broke")
+
+        uid = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "id": str(uid),
+                "attributes": {"title": "T", "content": "C"},
+            }
+        })
+        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+        response = view(request, article_id=uid)
+
+        assert response.status_code == 500
+
+    def test_response_with_included(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: int
+            name: str
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _singular_relationships: ClassVar = [("author", "authors")]
+            _edit_fields: ClassVar = ["id", "title", "content", "author"]
+            id: uuid.UUID
+            title: str
+            content: str
+            author: int
+
+        @api.edit_one("articles")
+        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> Response[EditableArticle]:
+            return Response(
+                data=EditableArticle(id=article_id, title=payload.title, content=payload.content, author=payload.author),
+                included=[Author(id=1, name="Alice")],
+            )
+
+        uid = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "id": str(uid),
+                "attributes": {"title": "T", "content": "C"},
+                "relationships": {"author": {"data": {"type": "authors", "id": 1}}},
+            }
+        })
+        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+        response = view(request, article_id=uid)
+
+        body = json.loads(response.content)
+        assert "included" in body
+        assert len(body["included"]) == 1
+        assert body["included"][0]["type"] == "authors"
+
+    def test_url_routing_with_get(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _edit_fields: ClassVar = ["id", "title", "content"]
+            id: uuid.UUID
+            title: str
+            content: str
+
+        @api.get_one("articles")
+        def get_article(request, article_id: uuid.UUID) -> EditableArticle:
+            return EditableArticle(id=article_id, title="Original", content="Original")
+
+        @api.edit_one("articles")
+        def edit_article(request, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
+            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
+
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            uid = uuid.uuid4()
+            body = json.dumps({
+                "data": {
+                    "type": "articles",
+                    "id": str(uid),
+                    "attributes": {"title": "Updated", "content": "Changed"},
+                }
+            })
+            request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+            response = edit_article(request, article_id=uid)
+
+            assert response.status_code == 200
+            resp_data = json.loads(response.content)
+            assert resp_data["data"]["attributes"]["title"] == "Updated"
+
+    def test_sync_handler(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _edit_fields: ClassVar = ["id", "title", "content"]
+            id: uuid.UUID
+            title: str
+            content: str
+
+        @api.edit_one("articles")
+        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
+            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
+
+        uid = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "id": str(uid),
+                "attributes": {"title": "T", "content": "C"},
+            }
+        })
+        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+        response = view(request, article_id=uid)
+        assert response.status_code == 200
+
+    def test_async_handler(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        import asyncio
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _edit_fields: ClassVar = ["id", "title", "content"]
+            id: uuid.UUID
+            title: str
+            content: str
+
+        @api.edit_one("articles")
+        async def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
+            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
+
+        uid = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "id": str(uid),
+                "attributes": {"title": "T", "content": "C"},
+            }
+        })
+        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+        response = asyncio.run(view(request, article_id=uid))
+        assert response.status_code == 200
+
+
+class TestDeleteOne:
+    def test_delete_one_url(self):
+        api = DjsonApi()
+
+        @api.delete_one("articles")
+        def view(request: HttpRequest, article_id: uuid.UUID) -> None: ...
+
+        urls = api.urls
+        assert any(u.name == "delete_one__articles" for u in urls)
+
+    def test_204_no_content(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        called = False
+
+        @api.delete_one("articles")
+        def view(request: HttpRequest, article_id: uuid.UUID) -> None:
+            nonlocal called
+            called = True
+
+        uid = uuid.uuid4()
+        request = factory.delete(f"/articles/{uid}")
+        response = view(request, article_id=uid)
+
+        assert called
+        assert response.status_code == 204
+
+    def test_404_handled(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.delete_one("articles")
+        def view(request: HttpRequest, article_id: uuid.UUID) -> None:
+            raise NotFound(f"Article with id '{article_id}' not found")
+
+        uid = uuid.uuid4()
+        request = factory.delete(f"/articles/{uid}")
+        response = view(request, article_id=uid)
+
+        assert response.status_code == 404
+
+    def test_500_on_error(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.delete_one("articles")
+        def view(request: HttpRequest, article_id: uuid.UUID) -> None:
+            raise ValueError("something broke")
+
+        uid = uuid.uuid4()
+        request = factory.delete(f"/articles/{uid}")
+        response = view(request, article_id=uid)
+
+        assert response.status_code == 500
+
+    def test_url_routing_with_get_patch_delete(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_one("articles")
+        def get_article(request, article_id: uuid.UUID) -> Article:
+            return Article(id=article_id, title="T", content="C")
+
+        @api.delete_one("articles")
+        def delete_article(request, article_id: uuid.UUID) -> None:
+            pass
+
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            uid = uuid.uuid4()
+            request = factory.delete(f"/articles/{uid}", content_type="application/vnd.api+json")
+            response = delete_article(request, article_id=uid)
+            assert response.status_code == 204
+
+    def test_async_handler(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        import asyncio
+
+        @api.delete_one("articles")
+        async def view(request: HttpRequest, article_id: uuid.UUID) -> None:
+            pass
+
+        uid = uuid.uuid4()
+        request = factory.delete(f"/articles/{uid}")
+        response = asyncio.run(view(request, article_id=uid))
+
+        assert response.status_code == 204
+
+
 class TestGetOne:
     def test_handler_called_with_correct_args(self):
         api = DjsonApi()

@@ -10,6 +10,7 @@ class ArticleResource(Resource):
     _singular_relationships: ClassVar = [("author", "users")]
     _create_fields: ClassVar = ["title", "content", "author"]
     _required_create_fields: ClassVar = ["title", "content"]
+    _edit_fields: ClassVar = ["id", "title", "content", "author"]
 
     id: int
     title: str

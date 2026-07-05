@@ -73,6 +73,34 @@ def create_article(request: HttpRequest, payload: ArticleResource) -> ArticleRes
     )
 
 
+@api.edit_one("articles")
+def edit_article(request: HttpRequest, article_id: int, payload: ArticleResource) -> ArticleResource:
+    try:
+        article = Article.objects.get(id=article_id)
+    except Article.DoesNotExist:
+        raise NotFound(f"Article with id '{article_id}' not found")
+    article.title = payload.title
+    article.content = payload.content
+    article.author_id = payload.author
+    article.save()
+    return ArticleResource(
+        id=article.id,
+        title=article.title,
+        content=article.content,
+        created_at=article.created_at,
+        author=article.author_id,
+    )
+
+
+@api.delete_one("articles")
+def delete_article(request: HttpRequest, article_id: int) -> None:
+    try:
+        article = Article.objects.get(id=article_id)
+    except Article.DoesNotExist:
+        raise NotFound(f"Article with id '{article_id}' not found")
+    article.delete()
+
+
 @api.get_one("users")
 def get_user(request: HttpRequest, user_id: int) -> UserResource:
     try:

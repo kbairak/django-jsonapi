@@ -394,12 +394,15 @@ class Resource:
         return value
 
     @classmethod
-    def _from_jsonapi_payload(cls, payload: dict) -> object:
+    def _from_jsonapi_payload(cls, payload: dict, fields: list[str] | None = None) -> object:
         data = payload["data"]
         annotations = cls._annotations()
         instance = object.__new__(cls)
 
-        for field in cls._create_fields:
+        if fields is None:
+            fields = cls._create_fields
+
+        for field in fields:
             if field == "id" and "id" in data:
                 instance.id = cls._convert_value(data["id"], annotations.get("id", str))
             elif field in cls._attributes:
