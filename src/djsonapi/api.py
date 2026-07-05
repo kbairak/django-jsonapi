@@ -1,8 +1,11 @@
 import asyncio
 import inspect
+import json as json_module
 import uuid as uuid_type
 from collections.abc import Callable
 from typing import Any, get_args, get_origin
+
+import jsonschema
 
 from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest, JsonResponse
@@ -194,29 +197,138 @@ class DjsonApi:
 
         return decorator
 
+    def create_one(self, type_name: str) -> Callable[..., Any]:
+        def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
+            url_name = f"create_one__{type_name}"
+            sig = inspect.signature(handler)
+            params = list(sig.parameters.values())
+            resource_class = None
+            for p in params:
+                if p.name != "request":
+                    anno = p.annotation
+                    if isinstance(anno, type) and issubclass(anno, Resource):
+                        resource_class = anno
+                        break
+            is_async = asyncio.iscoroutinefunction(handler)
+
+            if is_async:
+
+                async def async_wrapper(request, **kwargs) -> JsonResponse:
+                    try:
+                        body = json_module.loads(request.body)
+                        data = body.get("data", {})
+                        jsonschema.validate(data, resource_class.jsonschema_create())
+                        payload = resource_class._from_jsonapi_payload(body)
+                        result = await handler(request, payload=payload)
+                        return _create_response(result, type_name, self._type_to_endpoint())
+                    except json_module.JSONDecodeError as exc:
+                        return JsonResponse(
+                            {"errors": [{"status": "400", "title": "Bad request", "detail": str(exc)}]},
+                            status=400,
+                        )
+                    except jsonschema.ValidationError as exc:
+                        return JsonResponse(
+                            {"errors": [_validation_error_to_error_obj(exc)]},
+                            status=400,
+                            content_type="application/vnd.api+json",
+                        )
+                    except DjsonApiException as exc:
+                        return JsonResponse(
+                            {"errors": exc.render()},
+                            status=exc.status,
+                            content_type="application/vnd.api+json",
+                        )
+                    except Exception as exc:
+                        ise = InternalServerError(str(exc))
+                        return JsonResponse(
+                            {"errors": ise.render()},
+                            status=ise.status,
+                            content_type="application/vnd.api+json",
+                        )
+
+                async_wrapper.__name__ = handler.__name__
+                async_wrapper.__qualname__ = handler.__qualname__
+                async_wrapper.__module__ = handler.__module__
+                async_wrapper.__doc__ = handler.__doc__
+                wrapper = async_wrapper
+            else:
+
+                def sync_wrapper(request, **kwargs) -> JsonResponse:
+                    try:
+                        body = json_module.loads(request.body)
+                        data = body.get("data", {})
+                        jsonschema.validate(data, resource_class.jsonschema_create())
+                        payload = resource_class._from_jsonapi_payload(body)
+                        result = handler(request, payload=payload)
+                        return _create_response(result, type_name, self._type_to_endpoint())
+                    except json_module.JSONDecodeError as exc:
+                        return JsonResponse(
+                            {"errors": [{"status": "400", "title": "Bad request", "detail": str(exc)}]},
+                            status=400,
+                        )
+                    except jsonschema.ValidationError as exc:
+                        return JsonResponse(
+                            {"errors": [_validation_error_to_error_obj(exc)]},
+                            status=400,
+                            content_type="application/vnd.api+json",
+                        )
+                    except DjsonApiException as exc:
+                        return JsonResponse(
+                            {"errors": exc.render()},
+                            status=exc.status,
+                            content_type="application/vnd.api+json",
+                        )
+                    except Exception as exc:
+                        ise = InternalServerError(str(exc))
+                        return JsonResponse(
+                            {"errors": ise.render()},
+                            status=ise.status,
+                            content_type="application/vnd.api+json",
+                        )
+
+                sync_wrapper.__name__ = handler.__name__
+                sync_wrapper.__qualname__ = handler.__qualname__
+                sync_wrapper.__module__ = handler.__module__
+                sync_wrapper.__doc__ = handler.__doc__
+                wrapper = sync_wrapper
+
+            self._registry.append(
+                {
+                    "type_name": type_name,
+                    "method": "create_one",
+                    "handler": wrapper,
+                    "resource_class": resource_class,
+                }
+            )
+            return wrapper
+
+        return decorator
+
     @property
     def urls(self):
-        result = []
+        groups: dict = {}
         for entry in self._registry:
             type_name = entry["type_name"]
             if entry["method"] == "get_one":
                 pk_name = entry["pk_name"]
                 django_type = _PYTHON_TO_DJANGO_PATH.get(entry["pk_type"], "str")
-                result.append(
-                    path(
-                        f"{type_name}/<{django_type}:{pk_name}>",
-                        entry["handler"],
-                        name=f"get_one__{type_name}",
-                    )
-                )
+                path_str = f"{type_name}/<{django_type}:{pk_name}>"
+                groups.setdefault(path_str, {})["GET"] = (entry["handler"], f"get_one__{type_name}")
             elif entry["method"] == "get_many":
-                result.append(
-                    path(
-                        f"{type_name}/",
-                        entry["handler"],
-                        name=f"get_many__{type_name}",
-                    )
-                )
+                path_str = f"{type_name}/"
+                groups.setdefault(path_str, {})["GET"] = (entry["handler"], f"get_many__{type_name}")
+            elif entry["method"] == "create_one":
+                path_str = f"{type_name}/"
+                groups.setdefault(path_str, {})["POST"] = (entry["handler"], f"create_one__{type_name}")
+        result = []
+        for path_str, methods in groups.items():
+            if len(methods) == 1:
+                (handler, name) = next(iter(methods.values()))
+                result.append(path(path_str, handler, name=name))
+            else:
+                dispatch = _CombinedView({m: h for m, (h, _) in methods.items()})
+                for _, name in methods.values():
+                    result.append(path(path_str, dispatch, name=name))
         result.append(path("docs/", self._docs_view, name="docs"))
         return result
 
@@ -252,32 +364,19 @@ class DjsonApi:
                 openapi_type = _PYTHON_TO_OPENAPI.get(pk_type, "string")
                 path_str = f"/{type_name}/{{{pk_name}}}"
                 path_item = spec["paths"].setdefault(path_str, {})
-                schema = {"type": openapi_type}
+                param_schema = {"type": openapi_type}
                 if pk_type is uuid_type.UUID:
-                    schema["format"] = "uuid"
+                    param_schema["format"] = "uuid"
                 response_schema: dict = {}
                 if resource_class:
-                    schema_name = f"{type_name}_resource"
-                    schema_obj = resource_class.jsonschema_read()
-                    _add_links_to_schema(schema_obj, resource_class, type_to_endpoint)
-                    spec["components"]["schemas"][schema_name] = schema_obj
-                    response_schema = {
-                        "type": "object",
-                        "properties": {
-                            "data": {"$ref": f"#/components/schemas/{schema_name}"},
-                            "jsonapi": {
-                                "type": "object",
-                                "properties": {"version": {"const": "1.0"}},
-                            },
-                        },
-                    }
+                    response_schema = _response_schema(type_name, resource_class, type_to_endpoint, spec)
                 path_item["get"] = {
                     "parameters": [
                         {
                             "name": pk_name,
                             "in": "path",
                             "required": True,
-                            "schema": schema,
+                            "schema": param_schema,
                         }
                     ],
                     "responses": {
@@ -297,17 +396,12 @@ class DjsonApi:
                 path_item = spec["paths"].setdefault(path_str, {})
                 response_schema: dict = {}
                 if resource_class:
-                    schema_name = f"{type_name}_resource"
-                    if schema_name not in spec["components"]["schemas"]:
-                        schema_obj = resource_class.jsonschema_read()
-                        _add_links_to_schema(schema_obj, resource_class, type_to_endpoint)
-                        spec["components"]["schemas"][schema_name] = schema_obj
-                    response_schema = {
+                    response_array_schema = {
                         "type": "object",
                         "properties": {
                             "data": {
                                 "type": "array",
-                                "items": {"$ref": f"#/components/schemas/{schema_name}"},
+                                "items": {"$ref": f"#/components/schemas/{type_name}_resource"},
                             },
                             "jsonapi": {
                                 "type": "object",
@@ -315,6 +409,13 @@ class DjsonApi:
                             },
                         },
                     }
+                    _ensure_schema(type_name, resource_class, type_to_endpoint, spec)
+                    response_schema = response_array_schema
+
+            elif entry["method"] == "get_many":
+                path_str = f"/{type_name}/"
+                path_item = spec["paths"].setdefault(path_str, {})
+                response_schema = _response_schema(type_name, resource_class, type_to_endpoint, spec)
                 path_item["get"] = {
                     "responses": {
                         "200": {
@@ -325,6 +426,33 @@ class DjsonApi:
                                 }
                             },
                         }
+                    },
+                }
+
+            elif entry["method"] == "create_one":
+                path_str = f"/{type_name}/"
+                path_item = spec["paths"].setdefault(path_str, {})
+                response_schema: dict = {}
+                if resource_class:
+                    response_schema = _response_schema(type_name, resource_class, type_to_endpoint, spec)
+                path_item["post"] = {
+                    "requestBody": {
+                        "required": True,
+                        "content": {
+                            "application/vnd.api+json": {
+                                "schema": resource_class.jsonschema_create() if resource_class else {"type": "object"},
+                            }
+                        },
+                    },
+                    "responses": {
+                        "201": {
+                            "description": "Created",
+                            "content": {
+                                "application/vnd.api+json": {
+                                    "schema": response_schema or {"type": "object"}
+                                }
+                            },
+                        },
                     },
                 }
         return spec
@@ -391,3 +519,79 @@ def _add_links_to_schema(schema, resource_class, type_to_endpoint):
                     "related": {"type": "string", "format": "uri"},
                 },
             }
+
+
+def _ensure_schema(type_name, resource_class, type_to_endpoint, spec):
+    schema_name = f"{type_name}_resource"
+    if schema_name not in spec["components"]["schemas"]:
+        schema_obj = resource_class.jsonschema_read()
+        _add_links_to_schema(schema_obj, resource_class, type_to_endpoint)
+        spec["components"]["schemas"][schema_name] = schema_obj
+
+
+def _response_schema(type_name, resource_class, type_to_endpoint, spec):
+    _ensure_schema(type_name, resource_class, type_to_endpoint, spec)
+    return {
+        "type": "object",
+        "properties": {
+            "data": {"$ref": f"#/components/schemas/{type_name}_resource"},
+            "jsonapi": {
+                "type": "object",
+                "properties": {"version": {"const": "1.0"}},
+            },
+        },
+    }
+
+
+class _CombinedView:
+    def __init__(self, handlers):
+        self._handlers = handlers
+
+    def __call__(self, request, **kwargs):
+        handler = self._handlers.get(request.method)
+        if handler is None:
+            return JsonResponse(
+                {"errors": [{"status": "405", "title": "Method not allowed"}]},
+                status=405,
+            )
+        return handler(request, **kwargs)
+
+
+def _create_response(result, type_name, type_to_endpoint):
+    if result is None:
+        return JsonResponse({"jsonapi": {"version": "1.0"}}, status=202)
+
+    resource = result.serialize()
+    _add_relationship_links(resource, type_to_endpoint)
+
+    endpoint = type_to_endpoint.get(type_name)
+    location = None
+    if endpoint:
+        pk_value = getattr(result, "id", None)
+        if pk_value is not None:
+            try:
+                location = reverse(
+                    endpoint["url_name"],
+                    kwargs={endpoint["pk_name"]: str(pk_value)},
+                )
+            except (NoReverseMatch, ImproperlyConfigured):
+                pass
+
+    response = JsonResponse(
+        {"data": resource, "jsonapi": {"version": "1.0"}},
+        status=201,
+        content_type="application/vnd.api+json",
+    )
+    if location:
+        response["Location"] = location
+    return response
+
+
+def _validation_error_to_error_obj(exc: jsonschema.ValidationError) -> dict:
+    pointer_parts = ["data"] + [str(p) for p in exc.absolute_path]
+    return {
+        "status": "400",
+        "title": "Bad request",
+        "detail": exc.message,
+        "source": {"pointer": "/" + "/".join(pointer_parts)},
+    }

@@ -39,6 +39,22 @@ def list_articles(request: HttpRequest) -> list[ArticleResource]:
     ]
 
 
+@api.create_one("articles")
+def create_article(request: HttpRequest, payload: ArticleResource) -> ArticleResource:
+    article = Article.objects.create(
+        title=payload.title,
+        content=payload.content,
+        author_id=payload.author,
+    )
+    return ArticleResource(
+        id=article.id,
+        title=article.title,
+        content=article.content,
+        created_at=article.created_at,
+        author=article.author_id,
+    )
+
+
 @api.get_one("users")
 def get_user(request: HttpRequest, user_id: int) -> UserResource:
     try:

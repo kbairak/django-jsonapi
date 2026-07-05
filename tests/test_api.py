@@ -6,6 +6,7 @@ from typing import ClassVar
 
 import django
 from django.conf import settings
+from django.http import HttpRequest
 from django.test import RequestFactory
 from django.test.utils import override_settings
 
@@ -25,6 +26,8 @@ django.setup()
 class Article(Resource):
     _type: ClassVar = "articles"
     _attributes: ClassVar = ["title", "content"]
+    _create_fields: ClassVar = ["title", "content"]
+    _required_create_fields: ClassVar = ["title", "content"]
 
     id: uuid.UUID
     title: str
@@ -70,6 +73,210 @@ class TestUrls:
         urls = api.urls
         converters = urls[0].pattern.converters
         assert "article_id" in converters
+
+
+class TestCreateOne:
+    def test_create_one_url(self):
+        api = DjsonApi()
+
+        @api.create_one("articles")
+        def view(request: HttpRequest, payload: Article) -> Article: ...
+
+        urls = api.urls
+        assert len(urls) == 2
+        assert any(u.name == "create_one__articles" for u in urls)
+
+    def test_201_response_with_location(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_one("articles")
+        def get_article(request, article_id: uuid.UUID) -> Article: ...
+
+        @api.create_one("articles")
+        def view(request: HttpRequest, payload: Article) -> Article:
+            return Article(id=article_id, title=payload.title, content=payload.content)
+
+        article_id = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "attributes": {"title": "Test", "content": "Hello"},
+            }
+        })
+        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
+
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            response = view(request)
+
+        assert response.status_code == 201
+        assert response["Content-Type"] == "application/vnd.api+json"
+        assert "Location" in response
+
+        body = json.loads(response.content)
+        assert "data" in body
+        assert body["data"]["type"] == "articles"
+        assert "attributes" in body["data"]
+        assert body["data"]["attributes"]["title"] == "Test"
+        assert body["data"]["attributes"]["content"] == "Hello"
+
+    def test_202_accepted(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.create_one("articles")
+        def view(request: HttpRequest, payload: Article) -> None:
+            return None
+
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "attributes": {"title": "T", "content": "C"},
+            }
+        })
+        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
+        response = view(request)
+
+        assert response.status_code == 202
+        body = json.loads(response.content)
+        assert body["jsonapi"] == {"version": "1.0"}
+
+    def test_400_on_validation_error(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.create_one("articles")
+        def view(request: HttpRequest, payload: Article) -> Article:
+            return Article(id=uuid.uuid4(), title=payload.title, content=payload.content)
+
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "attributes": {"title": "T"},  # missing required "content"
+            }
+        })
+        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
+        response = view(request)
+
+        assert response.status_code == 400
+        assert response["Content-Type"] == "application/vnd.api+json"
+        body = json.loads(response.content)
+        assert "errors" in body
+        assert body["errors"][0]["source"]["pointer"] == "/data/attributes"
+
+    def test_400_on_invalid_json(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.create_one("articles")
+        def view(request: HttpRequest, payload: Article) -> Article:
+            return Article(id=uuid.uuid4(), title="T", content="C")
+
+        request = factory.post("/articles/", "not json", content_type="application/vnd.api+json")
+        response = view(request)
+
+        assert response.status_code == 400
+
+    def test_unhandled_exception_returns_500(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.create_one("articles")
+        def view(request: HttpRequest, payload: Article) -> Article:
+            raise ValueError("something broke")
+
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "attributes": {"title": "T", "content": "C"},
+            }
+        })
+        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
+        response = view(request)
+
+        assert response.status_code == 500
+        body = json.loads(response.content)
+        assert "errors" in body
+
+    def test_sync_handler(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.create_one("articles")
+        def view(request: HttpRequest, payload: Article) -> Article:
+            return Article(id=uuid.uuid4(), title=payload.title, content=payload.content)
+
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "attributes": {"title": "T", "content": "C"},
+            }
+        })
+        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
+        response = view(request)
+
+        assert response.status_code == 201
+        body = json.loads(response.content)
+        assert body["data"]["attributes"]["title"] == "T"
+
+    def test_async_handler(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.create_one("articles")
+        async def view(request: HttpRequest, payload: Article) -> Article:
+            return Article(id=uuid.uuid4(), title=payload.title, content=payload.content)
+
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "attributes": {"title": "T", "content": "C"},
+            }
+        })
+        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
+        import asyncio
+
+        response = asyncio.run(view(request))
+
+        assert response.status_code == 201
+        body = json.loads(response.content)
+        assert body["data"]["attributes"]["title"] == "T"
+
+    def test_client_generated_id_accepted(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class ArticleWithClientId(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _create_fields: ClassVar = ["id", "title", "content"]
+            _required_create_fields: ClassVar = ["title", "content"]
+
+            id: uuid.UUID
+            title: str
+            content: str
+
+        @api.create_one("articles")
+        def view(request: HttpRequest, payload: ArticleWithClientId) -> ArticleWithClientId:
+            return ArticleWithClientId(
+                id=payload.id, title=payload.title, content=payload.content
+            )
+
+        client_id = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "id": str(client_id),
+                "attributes": {"title": "T", "content": "C"},
+            }
+        })
+        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
+        response = view(request)
+
+        assert response.status_code == 201
+        body = json.loads(response.content)
+        assert body["data"]["id"] == str(client_id)
 
 
 class TestGetOne:

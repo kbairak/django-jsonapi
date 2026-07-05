@@ -363,6 +363,50 @@ class Resource:
             return str(value)
         return value
 
+    @staticmethod
+    def _convert_value(value: Any, tp: type) -> Any:
+        if tp is int:
+            return int(value)
+        if tp is float:
+            return float(value)
+        if tp is str:
+            return str(value)
+        if tp is bool:
+            return bool(value)
+        if tp is uuid.UUID:
+            return uuid.UUID(value)
+        if tp is datetime.datetime:
+            return datetime.datetime.fromisoformat(value)
+        if tp is datetime.date:
+            return datetime.date.fromisoformat(value)
+        return value
+
+    @classmethod
+    def _from_jsonapi_payload(cls, payload: dict) -> object:
+        data = payload["data"]
+        annotations = cls._annotations()
+        instance = object.__new__(cls)
+
+        for field in cls._create_fields:
+            if field == "id" and "id" in data:
+                instance.id = cls._convert_value(data["id"], annotations.get("id", str))
+            elif field in cls._attributes:
+                attr_val = data.get("attributes", {}).get(field)
+                if attr_val is not None:
+                    setattr(instance, field, cls._convert_value(attr_val, annotations.get(field, str)))
+            elif field in cls._rel_names():
+                rel_data = data.get("relationships", {}).get(field, {}).get("data")
+                if rel_data is not None:
+                    if isinstance(rel_data, dict):
+                        setattr(instance, field, cls._convert_value(rel_data["id"], annotations.get(field, str)))
+                    elif isinstance(rel_data, list):
+                        tp = annotations.get(field, list)
+                        args = get_args(tp)
+                        item_tp = args[0] if args else str
+                        setattr(instance, field, [cls._convert_value(item["id"], item_tp) for item in rel_data])
+
+        return instance
+
     def serialize(self) -> dict:
         result: dict = {"type": self._type}
         id_val = getattr(self, "id", MISSING)

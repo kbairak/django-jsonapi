@@ -49,6 +49,7 @@ def list_articles(request: HttpRequest) -> list[ArticleResource]:
 ## TODO
 
 - [ ] `create_one` — `POST /articles`
+- [ ] ReDoc docs UI at `/docs`
 - [ ] `edit_one` — `PATCH /articles/:id`
 - [ ] `delete_one` — `DELETE /articles/:id`
 - [ ] `get_relationship` (singular) — `GET /articles/:id/relationships/author`
@@ -63,4 +64,6 @@ def list_articles(request: HttpRequest) -> list[ArticleResource]:
 - [ ] Filters and other GET variables (for get_many)
 - [ ] Pagination (for get_many)
 - [ ] Mapping `/articles?filter[author]=...` to related resource URL
-- [ ] ReDoc docs UI at `/docs/`
+- [ ] Error responses in the openapi spec
+- [ ] Authentication
+
