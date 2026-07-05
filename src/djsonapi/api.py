@@ -285,6 +285,7 @@ class DjsonApi:
                         url_name,
                         kwargs,
                         self._type_to_endpoint(),
+                        rel_to_endpoint=self._rel_to_endpoint(),
                         fields=_extract_fields(query_params),
                     )
 
@@ -331,6 +332,7 @@ class DjsonApi:
                         url_name,
                         kwargs,
                         self._type_to_endpoint(),
+                        rel_to_endpoint=self._rel_to_endpoint(),
                         fields=_extract_fields(query_params),
                         included=included,
                     )
@@ -406,6 +408,7 @@ class DjsonApi:
                         result,
                         url_name,
                         self._type_to_endpoint(),
+                        rel_to_endpoint=self._rel_to_endpoint(),
                         fields=_extract_fields(query_params),
                     )
 
@@ -451,6 +454,7 @@ class DjsonApi:
                         raw,
                         url_name,
                         self._type_to_endpoint(),
+                        rel_to_endpoint=self._rel_to_endpoint(),
                         fields=_extract_fields(query_params),
                         included=included,
                     )
@@ -514,7 +518,7 @@ class DjsonApi:
                         result = await handler(request, payload=payload, **query_params)
                         raw, included = _unwrap_response(result)
                         return _create_response(
-                            raw, type_name, self._type_to_endpoint(), included=included
+                            raw, type_name, self._type_to_endpoint(), rel_to_endpoint=self._rel_to_endpoint(), included=included
                         )
                     except json_module.JSONDecodeError as exc:
                         return JsonResponse(
@@ -576,7 +580,7 @@ class DjsonApi:
                         result = handler(request, payload=payload, **query_params)
                         raw, included = _unwrap_response(result)
                         return _create_response(
-                            raw, type_name, self._type_to_endpoint(), included=included
+                            raw, type_name, self._type_to_endpoint(), rel_to_endpoint=self._rel_to_endpoint(), included=included
                         )
                     except json_module.JSONDecodeError as exc:
                         return JsonResponse(
@@ -672,6 +676,7 @@ class DjsonApi:
                             url_name,
                             kwargs,
                             self._type_to_endpoint(),
+                            rel_to_endpoint=self._rel_to_endpoint(),
                             fields=_extract_fields(query_params),
                             included=included,
                         )
@@ -739,6 +744,7 @@ class DjsonApi:
                             url_name,
                             kwargs,
                             self._type_to_endpoint(),
+                            rel_to_endpoint=self._rel_to_endpoint(),
                             fields=_extract_fields(query_params),
                             included=included,
                         )
@@ -868,6 +874,169 @@ class DjsonApi:
 
         return decorator
 
+    def get_relationship(self, type_name: str, rel_name: str) -> Callable[..., Any]:
+        def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
+            url_name = f"get_relationship__{type_name}__{rel_name}"
+            sig = inspect.signature(handler)
+            params = list(sig.parameters.values())
+            pk_param = [p for p in params if p.name != "request"][0]
+            pk_name = pk_param.name
+            pk_type = pk_param.annotation if pk_param.annotation != inspect.Parameter.empty else str
+            _validate_handler_params(handler, exclude=frozenset([pk_name]))
+            return_type = sig.return_annotation
+            origin = get_origin(return_type)
+            resource_class = None
+            is_plural = False
+            if origin is list:
+                is_plural = True
+                args = get_args(return_type)
+                if args:
+                    rc = args[0]
+                    if isinstance(rc, type) and issubclass(rc, Resource):
+                        resource_class = rc
+            elif (
+                return_type is not inspect.Parameter.empty
+                and isinstance(return_type, type)
+                and issubclass(return_type, Resource)
+            ):
+                resource_class = return_type
+            is_async = asyncio.iscoroutinefunction(handler)
+
+            if is_async:
+
+                async def async_wrapper(request, **kwargs) -> JsonResponse:
+                    try:
+                        query_params = _extract_query_params(
+                            handler, request, exclude=frozenset(kwargs.keys())
+                        )
+                    except ValueError as exc:
+                        return JsonResponse(
+                            {
+                                "errors": [
+                                    {"status": "400", "title": "Bad request", "detail": str(exc)}
+                                ]
+                            },
+                            status=400,
+                        )
+                    try:
+                        result = await handler(request, **query_params, **kwargs)
+                    except DjsonApiException as exc:
+                        return JsonResponse(
+                            {"errors": exc.render()},
+                            status=exc.status,
+                            content_type="application/vnd.api+json",
+                        )
+                    except Exception as exc:
+                        ise = InternalServerError(str(exc))
+                        return JsonResponse(
+                            {"errors": ise.render()},
+                            status=ise.status,
+                            content_type="application/vnd.api+json",
+                        )
+                    raw, included = _unwrap_response(result)
+                    rel = self._rel_to_endpoint()
+                    if is_plural:
+                        return _many_response(
+                            raw,
+                            url_name,
+                            self._type_to_endpoint(),
+                            rel_to_endpoint=rel,
+                            fields=_extract_fields(query_params),
+                            included=included,
+                            url_kwargs=kwargs,
+                        )
+                    return _one_response(
+                        raw,
+                        url_name,
+                        kwargs,
+                        self._type_to_endpoint(),
+                        rel_to_endpoint=rel,
+                        fields=_extract_fields(query_params),
+                        included=included,
+                    )
+
+                wrapper = functools.update_wrapper(
+                    async_wrapper,
+                    handler,
+                    assigned=("__module__", "__name__", "__qualname__", "__doc__"),
+                    updated=(),
+                )
+            else:
+
+                def sync_wrapper(request, **kwargs) -> JsonResponse:
+                    try:
+                        query_params = _extract_query_params(
+                            handler, request, exclude=frozenset(kwargs.keys())
+                        )
+                    except ValueError as exc:
+                        return JsonResponse(
+                            {
+                                "errors": [
+                                    {"status": "400", "title": "Bad request", "detail": str(exc)}
+                                ]
+                            },
+                            status=400,
+                        )
+                    try:
+                        result = handler(request, **query_params, **kwargs)
+                    except DjsonApiException as exc:
+                        return JsonResponse(
+                            {"errors": exc.render()},
+                            status=exc.status,
+                            content_type="application/vnd.api+json",
+                        )
+                    except Exception as exc:
+                        ise = InternalServerError(str(exc))
+                        return JsonResponse(
+                            {"errors": ise.render()},
+                            status=ise.status,
+                            content_type="application/vnd.api+json",
+                        )
+                    raw, included = _unwrap_response(result)
+                    rel = self._rel_to_endpoint()
+                    if is_plural:
+                        return _many_response(
+                            raw,
+                            url_name,
+                            self._type_to_endpoint(),
+                            rel_to_endpoint=rel,
+                            fields=_extract_fields(query_params),
+                            included=included,
+                            url_kwargs=kwargs,
+                        )
+                    return _one_response(
+                        raw,
+                        url_name,
+                        kwargs,
+                        self._type_to_endpoint(),
+                        rel_to_endpoint=rel,
+                        fields=_extract_fields(query_params),
+                        included=included,
+                    )
+
+                wrapper = functools.update_wrapper(
+                    sync_wrapper,
+                    handler,
+                    assigned=("__module__", "__name__", "__qualname__", "__doc__"),
+                    updated=(),
+                )
+
+            self._registry.append(
+                {
+                    "type_name": type_name,
+                    "method": "get_relationship",
+                    "rel_name": rel_name,
+                    "handler": wrapper,
+                    "pk_name": pk_name,
+                    "pk_type": pk_type,
+                    "resource_class": resource_class,
+                    "is_plural": is_plural,
+                }
+            )
+            return wrapper
+
+        return decorator
+
     @property
     def urls(self):
         groups: dict = {}
@@ -909,6 +1078,14 @@ class DjsonApi:
                     entry["handler"],
                     f"delete_one__{type_name}",
                 )
+            elif entry["method"] == "get_relationship":
+                pk_name = entry["pk_name"]
+                django_type = _PYTHON_TO_DJANGO_PATH.get(entry["pk_type"], "str")
+                path_str = f"{type_name}/<{django_type}:{pk_name}>/{entry['rel_name']}"
+                groups.setdefault(path_str, {})["GET"] = (
+                    entry["handler"],
+                    f"get_relationship__{type_name}__{entry['rel_name']}",
+                )
         result = []
         for path_str, methods in groups.items():
             if len(methods) == 1:
@@ -929,6 +1106,17 @@ class DjsonApi:
                 continue
             result[entry["type_name"]] = {
                 "url_name": f"get_one__{entry['type_name']}",
+                "pk_name": entry["pk_name"],
+            }
+        return result
+
+    def _rel_to_endpoint(self) -> dict[tuple[str, str], dict]:
+        result = {}
+        for entry in self._registry:
+            if entry["method"] != "get_relationship":
+                continue
+            result[(entry["type_name"], entry["rel_name"])] = {
+                "url_name": f"get_relationship__{entry['type_name']}__{entry['rel_name']}",
                 "pk_name": entry["pk_name"],
             }
         return result
@@ -1135,13 +1323,100 @@ class DjsonApi:
                         "204": {"description": "No Content"},
                     },
                 }
+            elif entry["method"] == "get_relationship":
+                pk_name = entry["pk_name"]
+                pk_type = entry["pk_type"]
+                rel_name = entry["rel_name"]
+                openapi_type = _PYTHON_TO_OPENAPI.get(pk_type, "string")
+                path_str = f"/{type_name}/{{{pk_name}}}/{rel_name}"
+                path_item = spec["paths"].setdefault(path_str, {})
+                param_schema = {"type": openapi_type}
+                if pk_type is uuid_type.UUID:
+                    param_schema["format"] = "uuid"
+                response_schema: dict = {}
+                if resource_class:
+                    rel_type_name = resource_class._type
+                    if entry["is_plural"]:
+                        _ensure_schema(rel_type_name, resource_class, type_to_endpoint, spec)
+                        response_schema = {
+                            "type": "object",
+                            "properties": {
+                                "data": {
+                                    "type": "array",
+                                    "items": {"$ref": f"#/components/schemas/{rel_type_name}_resource"},
+                                },
+                                "jsonapi": {
+                                    "type": "object",
+                                    "properties": {"version": {"const": "1.0"}},
+                                },
+                            },
+                        }
+                    else:
+                        response_schema = _response_schema(
+                            rel_type_name, resource_class, type_to_endpoint, spec
+                        )
+                path_item["get"] = {
+                    "tags": [type_name],
+                    "summary": summary,
+                    "parameters": [
+                        {
+                            "name": pk_name,
+                            "in": "path",
+                            "required": True,
+                            "schema": param_schema,
+                        }
+                    ],
+                    "responses": {
+                        "200": {
+                            "description": "OK",
+                            "content": {
+                                "application/vnd.api+json": {
+                                    "schema": response_schema or {"type": "object"}
+                                }
+                            },
+                        }
+                    },
+                }
+                _add_query_params_to_op(entry["handler"], path_item["get"])
+        schema_names = list(spec["components"]["schemas"].keys())
+        if schema_names:
+            endpoint_tags = sorted(set(entry["type_name"] for entry in self._registry))
+            schema_tags = []
+            for schema_name in schema_names:
+                type_name = schema_name.removesuffix("_resource")
+                tag_name = f"{type_name}_schema"
+                schema_tags.append(tag_name)
+                spec.setdefault("tags", []).append(
+                    {
+                        "name": tag_name,
+                        "x-displayName": type_name,
+                        "description": f'<SchemaDefinition schemaRef="#/components/schemas/{schema_name}" />',
+                    }
+                )
+            spec["x-tagGroups"] = [
+                {"name": "Endpoints", "tags": endpoint_tags},
+                {"name": "Schemas", "tags": schema_tags},
+            ]
         return spec
 
 
-def _add_relationship_links(resource, type_to_endpoint):
-    for rel_data in resource.get("relationships", {}).values():
+def _add_relationship_links(resource, type_to_endpoint, rel_to_endpoint=None):
+    parent_type = resource.get("type")
+    for rel_field, rel_data in resource.get("relationships", {}).items():
         data = rel_data.get("data")
         if isinstance(data, dict):
+            if rel_to_endpoint:
+                rel_endpoint = rel_to_endpoint.get((parent_type, rel_field))
+                if rel_endpoint:
+                    try:
+                        related_url = reverse(
+                            rel_endpoint["url_name"],
+                            kwargs={rel_endpoint["pk_name"]: resource["id"]},
+                        )
+                        rel_data.setdefault("links", {})["related"] = related_url
+                        continue
+                    except (NoReverseMatch, ImproperlyConfigured):
+                        pass
             rel_type = data.get("type")
             endpoint = type_to_endpoint.get(rel_type)
             if endpoint:
@@ -1168,16 +1443,16 @@ def _apply_fields(resource, fields_for_type):
         }
 
 
-def _serialize_resource(result, type_to_endpoint, fields):
+def _serialize_resource(result, type_to_endpoint, fields, rel_to_endpoint=None):
     resource = result.serialize()
-    _add_relationship_links(resource, type_to_endpoint)
+    _add_relationship_links(resource, type_to_endpoint, rel_to_endpoint=rel_to_endpoint)
     if fields:
         _apply_fields(resource, fields.get(result._type))
     return resource
 
 
-def _one_response(result, url_name, kwargs, type_to_endpoint, fields=None, included=None):
-    resource = _serialize_resource(result, type_to_endpoint, fields)
+def _one_response(result, url_name, kwargs, type_to_endpoint, fields=None, included=None, rel_to_endpoint=None):
+    resource = _serialize_resource(result, type_to_endpoint, fields, rel_to_endpoint=rel_to_endpoint)
     try:
         self_url = reverse(url_name, kwargs=kwargs)
         resource.setdefault("links", {})["self"] = self_url
@@ -1187,21 +1462,24 @@ def _one_response(result, url_name, kwargs, type_to_endpoint, fields=None, inclu
 
     body: dict = {"data": resource, "links": links, "jsonapi": {"version": "1.0"}}
     if included:
-        body["included"] = [_serialize_resource(r, type_to_endpoint, fields) for r in included]
+        body["included"] = [_serialize_resource(r, type_to_endpoint, fields, rel_to_endpoint=rel_to_endpoint) for r in included]
     return JsonResponse(body, content_type="application/vnd.api+json")
 
 
-def _many_response(result_list, url_name, type_to_endpoint, fields=None, included=None):
-    resources = [_serialize_resource(r, type_to_endpoint, fields) for r in result_list]
+def _many_response(result_list, url_name, type_to_endpoint, fields=None, included=None, rel_to_endpoint=None, url_kwargs=None):
+    resources = [_serialize_resource(r, type_to_endpoint, fields, rel_to_endpoint=rel_to_endpoint) for r in result_list]
     try:
-        self_url = reverse(url_name)
+        if url_kwargs:
+            self_url = reverse(url_name, kwargs=url_kwargs)
+        else:
+            self_url = reverse(url_name)
         links = {"self": self_url}
     except (NoReverseMatch, ImproperlyConfigured):
         links = {}
 
     body: dict = {"data": resources, "links": links, "jsonapi": {"version": "1.0"}}
     if included:
-        body["included"] = [_serialize_resource(r, type_to_endpoint, fields) for r in included]
+        body["included"] = [_serialize_resource(r, type_to_endpoint, fields, rel_to_endpoint=rel_to_endpoint) for r in included]
     return JsonResponse(body, content_type="application/vnd.api+json")
 
 
@@ -1224,6 +1502,7 @@ def _ensure_schema(type_name, resource_class, type_to_endpoint, spec):
     if schema_name not in spec["components"]["schemas"]:
         schema_obj = resource_class.jsonschema_read()
         _add_links_to_schema(schema_obj, resource_class, type_to_endpoint)
+        schema_obj["title"] = type_name
         spec["components"]["schemas"][schema_name] = schema_obj
 
 
@@ -1255,11 +1534,11 @@ class _CombinedView:
         return handler(request, **kwargs)
 
 
-def _create_response(result, type_name, type_to_endpoint, fields=None, included=None):
+def _create_response(result, type_name, type_to_endpoint, fields=None, included=None, rel_to_endpoint=None):
     if result is None:
         return JsonResponse({"jsonapi": {"version": "1.0"}}, status=202)
 
-    resource = _serialize_resource(result, type_to_endpoint, fields)
+    resource = _serialize_resource(result, type_to_endpoint, fields, rel_to_endpoint=rel_to_endpoint)
 
     endpoint = type_to_endpoint.get(type_name)
     location = None
@@ -1276,7 +1555,7 @@ def _create_response(result, type_name, type_to_endpoint, fields=None, included=
 
     body: dict = {"data": resource, "jsonapi": {"version": "1.0"}}
     if included:
-        body["included"] = [_serialize_resource(r, type_to_endpoint, fields) for r in included]
+        body["included"] = [_serialize_resource(r, type_to_endpoint, fields, rel_to_endpoint=rel_to_endpoint) for r in included]
     response = JsonResponse(body, status=201, content_type="application/vnd.api+json")
     if location:
         response["Location"] = location

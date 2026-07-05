@@ -114,3 +114,16 @@ def get_user(request: HttpRequest, user_id: int) -> UserResource:
 def list_users(request: HttpRequest) -> list[UserResource]:
     users = User.objects.all()
     return [UserResource(id=user.pk, username=user.username, email=user.email) for user in users]
+
+
+@api.get_relationship("articles", "author")
+def get_article_author(request: HttpRequest, article_id: int) -> UserResource:
+    try:
+        article = Article.objects.select_related("author").get(id=article_id)
+    except Article.DoesNotExist:
+        raise NotFound(f"Article with id '{article_id}' not found")
+    return UserResource(
+        id=article.author.pk,
+        username=article.author.username,
+        email=article.author.email,
+    )

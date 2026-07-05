@@ -673,6 +673,425 @@ class TestDeleteOne:
         assert response.status_code == 204
 
 
+class TestGetRelationship:
+    def test_get_relationship_url(self):
+        api = DjsonApi()
+
+        @api.get_relationship("articles", "author")
+        def view(request, article_id: uuid.UUID) -> Article: ...
+
+        urls = api.urls
+        assert any(u.name == "get_relationship__articles__author" for u in urls)
+
+    def test_singular_handler_called_with_correct_args(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        calls = []
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: uuid.UUID
+            name: str
+
+        @api.get_relationship("articles", "author")
+        def view(request, article_id: uuid.UUID) -> Author:
+            calls.append((request, article_id))
+            return Author(id=uuid.uuid4(), name="Alice")
+
+        uid = uuid.uuid4()
+        request = factory.get(f"/articles/{uid}/author")
+        view(request, article_id=uid)
+
+        assert len(calls) == 1
+        assert calls[0] == (request, uid)
+
+    def test_plural_handler_called_with_correct_args(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        calls = []
+
+        class Comment(Resource):
+            _type: ClassVar = "comments"
+            id: uuid.UUID
+            body: str
+
+        @api.get_relationship("articles", "comments")
+        def view(request, article_id: uuid.UUID) -> list[Comment]:
+            calls.append((request, article_id))
+            return [Comment(id=uuid.uuid4(), body="Nice post!")]
+
+        uid = uuid.uuid4()
+        request = factory.get(f"/articles/{uid}/comments")
+        view(request, article_id=uid)
+
+        assert len(calls) == 1
+        assert calls[0] == (request, uid)
+
+    def test_singular_response_structure(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            _attributes: ClassVar = ["name"]
+            id: uuid.UUID
+            name: str
+
+        @api.get_relationship("articles", "author")
+        def view(request, article_id: uuid.UUID) -> Author:
+            return Author(id=uuid.uuid4(), name="Alice")
+
+        uid = uuid.uuid4()
+        request = factory.get(f"/articles/{uid}/author")
+        response = view(request, article_id=uid)
+
+        assert response.status_code == 200
+        assert response["Content-Type"] == "application/vnd.api+json"
+
+        body = json.loads(response.content)
+        assert "data" in body
+        assert body["data"]["type"] == "authors"
+        assert body["data"]["attributes"]["name"] == "Alice"
+
+    def test_plural_response_structure(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Comment(Resource):
+            _type: ClassVar = "comments"
+            _attributes: ClassVar = ["body"]
+            id: uuid.UUID
+            body: str
+
+        @api.get_relationship("articles", "comments")
+        def view(request, article_id: uuid.UUID) -> list[Comment]:
+            author_id = uuid.uuid4()
+            return [
+                Comment(id=uuid.uuid4(), body="First!"),
+                Comment(id=uuid.uuid4(), body="Second"),
+            ]
+
+        uid = uuid.uuid4()
+        request = factory.get(f"/articles/{uid}/comments")
+        response = view(request, article_id=uid)
+
+        assert response.status_code == 200
+        body = json.loads(response.content)
+        assert isinstance(body["data"], list)
+        assert len(body["data"]) == 2
+        for item in body["data"]:
+            assert item["type"] == "comments"
+            assert "attributes" in item
+
+    def test_self_link_when_reverse_works(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: uuid.UUID
+            name: str
+
+        @api.get_relationship("articles", "author")
+        def view(request, article_id: uuid.UUID) -> Author:
+            return Author(id=uuid.uuid4(), name="Alice")
+
+        urlconf = _make_urlconf(api)
+        uid = uuid.uuid4()
+
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get(f"/articles/{uid}/author")
+            response = view(request, article_id=uid)
+
+        body = json.loads(response.content)
+        assert body["data"]["links"]["self"] == f"/articles/{uid}/author"
+        assert body["links"]["self"] == f"/articles/{uid}/author"
+
+    def test_plural_self_link(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Comment(Resource):
+            _type: ClassVar = "comments"
+            id: uuid.UUID
+            body: str
+
+        @api.get_relationship("articles", "comments")
+        def view(request, article_id: uuid.UUID) -> list[Comment]:
+            return [Comment(id=uuid.uuid4(), body="Nice")]
+
+        urlconf = _make_urlconf(api)
+        uid = uuid.uuid4()
+
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get(f"/articles/{uid}/comments")
+            response = view(request, article_id=uid)
+
+        body = json.loads(response.content)
+        assert body["links"]["self"] == f"/articles/{uid}/comments"
+
+    def test_related_links_use_relationship_endpoint(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: uuid.UUID
+            name: str
+
+        class Book(Resource):
+            _type: ClassVar = "books"
+            _attributes: ClassVar = ["title"]
+            _singular_relationships: ClassVar = [("author", "authors")]
+            id: uuid.UUID
+            title: str
+            author: uuid.UUID
+
+        @api.get_relationship("books", "author")
+        def get_book_author(request, book_id: uuid.UUID) -> Author:
+            return Author(id=uuid.uuid4(), name="Alice")
+
+        @api.get_many("books")
+        def list_books(request) -> list[Book]:
+            return [
+                Book(id=uuid.uuid4(), title="B1", author=uuid.uuid4()),
+            ]
+
+        urlconf = _make_urlconf(api)
+
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get("/books/")
+            response = list_books(request)
+
+        body = json.loads(response.content)
+        for item in body["data"]:
+            rel = item["relationships"]["author"]
+            assert "links" in rel
+            assert "related" in rel["links"]
+            # Should link to relationship endpoint, not get_one endpoint
+            assert rel["links"]["related"].startswith("/books/")
+
+    def test_related_links_fallback_to_get_one(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: uuid.UUID
+            name: str
+
+        class Book(Resource):
+            _type: ClassVar = "books"
+            _attributes: ClassVar = ["title"]
+            _singular_relationships: ClassVar = [("author", "authors")]
+            id: uuid.UUID
+            title: str
+            author: uuid.UUID
+
+        @api.get_one("authors")
+        def get_author(request, author_id: uuid.UUID) -> Author:
+            return Author(id=author_id, name="A")
+
+        @api.get_many("books")
+        def list_books(request) -> list[Book]:
+            author_id = uuid.uuid4()
+            return [
+                Book(id=uuid.uuid4(), title="B1", author=author_id),
+            ]
+
+        urlconf = _make_urlconf(api)
+
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get("/books/")
+            response = list_books(request)
+
+        body = json.loads(response.content)
+        for item in body["data"]:
+            rel = item["relationships"]["author"]
+            assert "links" in rel
+            assert "related" in rel["links"]
+            assert rel["links"]["related"].startswith("/authors/")
+
+    def test_response_with_included(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: int
+            name: str
+
+        class Editor(Resource):
+            _type: ClassVar = "editors"
+            id: int
+            name: str
+
+        @api.get_relationship("articles", "author")
+        def view(request, article_id: int) -> Response[Author]:
+            return Response(
+                data=Author(id=1, name="Alice"),
+                included=[Editor(id=1, name="Bob")],
+            )
+
+        request = factory.get("/articles/1/author")
+        response = view(request, article_id=1)
+
+        body = json.loads(response.content)
+        assert "included" in body
+        assert len(body["included"]) == 1
+        assert body["included"][0]["type"] == "editors"
+
+    def test_404_on_not_found(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        from djsonapi.exceptions import NotFound
+
+        @api.get_relationship("articles", "author")
+        def view(request, article_id: int) -> Article:
+            raise NotFound(f"Article {article_id} not found")
+
+        request = factory.get("/articles/1/author")
+        response = view(request, article_id=1)
+
+        assert response.status_code == 404
+        body = json.loads(response.content)
+        assert "errors" in body
+
+    def test_500_on_unhandled_exception(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        @api.get_relationship("articles", "author")
+        def view(request, article_id: int) -> Article:
+            raise ValueError("something broke")
+
+        request = factory.get("/articles/1/author")
+        response = view(request, article_id=1)
+
+        assert response.status_code == 500
+        body = json.loads(response.content)
+        assert "errors" in body
+
+    def test_sync_handler(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: uuid.UUID
+            name: str
+
+        @api.get_relationship("articles", "author")
+        def view(request, article_id: uuid.UUID) -> Author:
+            return Author(id=uuid.uuid4(), name="Alice")
+
+        uid = uuid.uuid4()
+        request = factory.get(f"/articles/{uid}/author")
+        response = view(request, article_id=uid)
+
+        assert response.status_code == 200
+
+    def test_async_handler(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        import asyncio
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: uuid.UUID
+            name: str
+
+        @api.get_relationship("articles", "author")
+        async def view(request, article_id: uuid.UUID) -> Author:
+            return Author(id=uuid.uuid4(), name="Alice")
+
+        uid = uuid.uuid4()
+        request = factory.get(f"/articles/{uid}/author")
+        response = asyncio.run(view(request, article_id=uid))
+
+        assert response.status_code == 200
+
+    def test_query_params_passed_to_handler(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: uuid.UUID
+            name: str
+
+        @api.get_relationship("articles", "author")
+        def view(request, article_id: uuid.UUID, filter__q: str = "") -> Author:
+            calls.append(filter__q)
+            return Author(id=uuid.uuid4(), name="Alice")
+
+        uid = uuid.uuid4()
+        request = factory.get(f"/articles/{uid}/author?filter[q]=test")
+        view(request, article_id=uid)
+
+        assert calls == ["test"]
+
+    def test_url_routing_with_get_one(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: uuid.UUID
+            name: str
+
+        @api.get_one("articles")
+        def get_article(request, article_id: uuid.UUID) -> Article:
+            return Article(id=article_id, title="T", content="C")
+
+        @api.get_relationship("articles", "author")
+        def get_article_author(request, article_id: uuid.UUID) -> Author:
+            return Author(id=uuid.uuid4(), name="Alice")
+
+        urlconf = _make_urlconf(api)
+        uid = uuid.uuid4()
+
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get(f"/articles/{uid}/author")
+            response = get_article_author(request, article_id=uid)
+
+        assert response.status_code == 200
+        body = json.loads(response.content)
+        assert body["data"]["type"] == "authors"
+
+    def test_openapi_spec(self):
+        api = DjsonApi()
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: uuid.UUID
+            name: str
+
+        @api.get_relationship("articles", "author")
+        def view(request, article_id: uuid.UUID) -> Author:
+            return Author(id=uuid.uuid4(), name="Alice")
+
+        spec = api._build_openapi_spec()
+        assert "/articles/{article_id}/author" in spec["paths"]
+        op = spec["paths"]["/articles/{article_id}/author"]["get"]
+        assert op["tags"] == ["articles"]
+        params = {p["name"]: p for p in op.get("parameters", [])}
+        assert "article_id" in params
+        assert params["article_id"]["in"] == "path"
+
+    def test_invalid_param_raises_improperly_configured(self):
+        from django.core.exceptions import ImproperlyConfigured
+
+        api = DjsonApi()
+        with pytest.raises(ImproperlyConfigured):
+
+            @api.get_relationship("articles", "author")
+            def view(request, article_id: int, bad_param: str) -> Article: ...
+
+
 class TestGetOne:
     def test_handler_called_with_correct_args(self):
         api = DjsonApi()
