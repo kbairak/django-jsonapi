@@ -217,7 +217,10 @@ def _add_query_params_to_op(handler: Callable, op: dict) -> None:
 
 
 def _build_relationship_schema(rel_id_type: type, is_plural: bool) -> dict:
-    if _is_nullable(rel_id_type):
+    if is_plural:
+        args = get_args(rel_id_type)
+        effective_id_type = args[0] if args else str
+    elif _is_nullable(rel_id_type):
         non_null_args = [a for a in get_args(rel_id_type) if a is not type(None)]
         effective_id_type = non_null_args[0] if non_null_args else str
     else:
@@ -1509,7 +1512,9 @@ class DjsonApi:
                 response_schema: dict = {}
                 if resource_class:
                     response_schema = _response_schema(
-                        type_name, resource_class, type_to_endpoint, spec, rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint()
+                        type_name, resource_class, type_to_endpoint, spec,
+                        rel_to_endpoint=self._rel_to_endpoint(),
+                        rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
                     )
                 path_item["get"] = {
                     "tags": [type_name],
@@ -1539,7 +1544,9 @@ class DjsonApi:
                 path_str = f"/{type_name}/"
                 path_item = spec["paths"].setdefault(path_str, {})
                 response_schema = _response_schema(
-                    type_name, resource_class, type_to_endpoint, spec
+                    type_name, resource_class, type_to_endpoint, spec,
+                    rel_to_endpoint=self._rel_to_endpoint(),
+                    rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
                 )
                 path_item["get"] = {
                     "tags": [type_name],
@@ -1563,7 +1570,9 @@ class DjsonApi:
                 response_schema: dict = {}
                 if resource_class:
                     response_schema = _response_schema(
-                        type_name, resource_class, type_to_endpoint, spec, rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint()
+                        type_name, resource_class, type_to_endpoint, spec,
+                        rel_to_endpoint=self._rel_to_endpoint(),
+                        rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
                     )
                 path_item["post"] = {
                     "tags": [type_name],
@@ -1603,7 +1612,9 @@ class DjsonApi:
                 response_schema: dict = {}
                 if resource_class:
                     response_schema = _response_schema(
-                        type_name, resource_class, type_to_endpoint, spec, rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint()
+                        type_name, resource_class, type_to_endpoint, spec,
+                        rel_to_endpoint=self._rel_to_endpoint(),
+                        rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
                     )
                 path_item["patch"] = {
                     "tags": [type_name],
@@ -1677,7 +1688,9 @@ class DjsonApi:
                 if resource_class:
                     rel_type_name = resource_class._type
                     if entry["is_plural"]:
-                        _ensure_schema(rel_type_name, resource_class, type_to_endpoint, spec, rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint())
+                        _ensure_schema(rel_type_name, resource_class, type_to_endpoint, spec,
+                            rel_to_endpoint=self._rel_to_endpoint(),
+                            rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),)
                         response_schema = {
                             "type": "object",
                             "properties": {
@@ -1864,6 +1877,18 @@ def _add_relationship_links(resource, type_to_endpoint, rel_to_endpoint=None, re
                     rel_data.setdefault("links", {})["related"] = related_url
                 except (NoReverseMatch, ImproperlyConfigured):
                     pass
+        elif isinstance(data, list):
+            if rel_to_endpoint:
+                rel_endpoint = rel_to_endpoint.get((parent_type, rel_field))
+                if rel_endpoint:
+                    try:
+                        related_url = reverse(
+                            rel_endpoint["url_name"],
+                            kwargs={rel_endpoint["pk_name"]: resource["id"]},
+                        )
+                        rel_data.setdefault("links", {})["related"] = related_url
+                    except (NoReverseMatch, ImproperlyConfigured):
+                        pass
 
 
 def _apply_fields(resource, fields_for_type):
@@ -1923,7 +1948,7 @@ def _many_response(result_list, url_name, type_to_endpoint, fields=None, include
     return JsonResponse(body, content_type="application/vnd.api+json")
 
 
-def _add_links_to_schema(schema, resource_class, type_to_endpoint, rel_mgmt_to_endpoint=None):
+def _add_links_to_schema(schema, resource_class, type_to_endpoint, rel_to_endpoint=None, rel_mgmt_to_endpoint=None):
     rel_props = schema.get("properties", {}).get("relationships", {}).get("properties", {})
     for rel_field, rel_type_name in resource_class._singular_relationships:
         endpoint = type_to_endpoint.get(rel_type_name)
@@ -1938,19 +1963,32 @@ def _add_links_to_schema(schema, resource_class, type_to_endpoint, rel_mgmt_to_e
                 "type": "object",
                 "properties": links_props,
             }
+    for rel_field, rel_type_name in resource_class._plural_relationships:
+        if rel_field in rel_props:
+            rel_props[rel_field]["properties"] = rel_props[rel_field].get("properties", {})
+            links_props = {}
+            if rel_to_endpoint and rel_to_endpoint.get((resource_class._type, rel_field)):
+                links_props["related"] = {"type": "string", "format": "uri"}
+            if rel_mgmt_to_endpoint and rel_mgmt_to_endpoint.get((resource_class._type, rel_field)):
+                links_props["self"] = {"type": "string", "format": "uri"}
+            if links_props:
+                rel_props[rel_field]["properties"]["links"] = {
+                    "type": "object",
+                    "properties": links_props,
+                }
 
 
-def _ensure_schema(type_name, resource_class, type_to_endpoint, spec, rel_mgmt_to_endpoint=None):
+def _ensure_schema(type_name, resource_class, type_to_endpoint, spec, rel_to_endpoint=None, rel_mgmt_to_endpoint=None):
     schema_name = f"{type_name}_resource"
     if schema_name not in spec["components"]["schemas"]:
         schema_obj = resource_class.jsonschema_read()
-        _add_links_to_schema(schema_obj, resource_class, type_to_endpoint, rel_mgmt_to_endpoint=rel_mgmt_to_endpoint)
+        _add_links_to_schema(schema_obj, resource_class, type_to_endpoint, rel_to_endpoint=rel_to_endpoint, rel_mgmt_to_endpoint=rel_mgmt_to_endpoint)
         schema_obj["title"] = type_name
         spec["components"]["schemas"][schema_name] = schema_obj
 
 
-def _response_schema(type_name, resource_class, type_to_endpoint, spec, rel_mgmt_to_endpoint=None):
-    _ensure_schema(type_name, resource_class, type_to_endpoint, spec, rel_mgmt_to_endpoint=rel_mgmt_to_endpoint)
+def _response_schema(type_name, resource_class, type_to_endpoint, spec, rel_to_endpoint=None, rel_mgmt_to_endpoint=None):
+    _ensure_schema(type_name, resource_class, type_to_endpoint, spec, rel_to_endpoint=rel_to_endpoint, rel_mgmt_to_endpoint=rel_mgmt_to_endpoint)
     return {
         "type": "object",
         "properties": {
@@ -2047,7 +2085,11 @@ def _create_response(result, type_name, type_to_endpoint, fields=None, included=
 
 
 def _convert_rel_id(raw_id: Any, tp: type) -> Any:
-    if _is_nullable(tp):
+    origin = get_origin(tp)
+    if origin is list:
+        args = get_args(tp)
+        effective_type = args[0] if args else str
+    elif _is_nullable(tp):
         non_null_args = [a for a in get_args(tp) if a is not type(None)]
         effective_type = non_null_args[0] if non_null_args else str
     else:

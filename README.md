@@ -64,5 +64,5 @@ def list_articles(request: HttpRequest) -> list[ArticleResource]:
 - [x] Sorting (`sort=...`)
 - [x] Error responses in the openapi spec
 - [x] Pagination (for get_many)
-- [ ] Mapping `/articles?filter[author]=...` to related resource URL
+- [x] Mapping `/articles?filter[author]=...` to related resource URL: Do nothing but include the helper pattern in the readme
 - [ ] Authentication

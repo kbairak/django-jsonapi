@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import field
 import json
 import sys
 import types
@@ -2162,7 +2163,303 @@ class TestPaginationLinks:
         assert body["links"]["prev"] == f"/articles/{uid}?page=1"
 
 
-class TestExceptions:
+class TestPluralRelationshipLinks:
+    def test_related_link_for_plural_relationship(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Chapter(Resource):
+            _type: ClassVar = "chapters"
+            id: uuid.UUID
+            title: str
+
+        class Book(Resource):
+            _type: ClassVar = "books"
+            _attributes: ClassVar = ["title"]
+            _singular_relationships: ClassVar = [("author", "users")]
+            _plural_relationships: ClassVar = [("chapters", "chapters")]
+            id: uuid.UUID
+            title: str
+            author: uuid.UUID
+            chapters: list[uuid.UUID] = field(default_factory=list)
+
+        @api.get_one("books")
+        def get_book(request, book_id: uuid.UUID) -> Book:
+            return Book(id=book_id, title="B", author=uuid.uuid4(), chapters=[])
+
+        @api.get_relationship("books", "chapters")
+        def get_book_chapters(request, book_id: uuid.UUID) -> list[Chapter]:
+            return []
+
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            uid = uuid.uuid4()
+            request = factory.get(f"/books/{uid}")
+            response = get_book(request, book_id=uid)
+
+        body = json.loads(response.content)
+        rel = body["data"]["relationships"]["chapters"]
+        assert "links" in rel
+        assert "related" in rel["links"]
+        assert rel["links"]["related"] == f"/books/{uid}/chapters"
+
+    def test_self_link_for_plural_relationship(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Chapter(Resource):
+            _type: ClassVar = "chapters"
+            id: uuid.UUID
+            title: str
+
+        class Book(Resource):
+            _type: ClassVar = "books"
+            _attributes: ClassVar = ["title"]
+            _plural_relationships: ClassVar = [("chapters", "chapters")]
+            id: uuid.UUID
+            title: str
+            chapters: list[uuid.UUID] = field(default_factory=list)
+
+        @api.get_one("books")
+        def get_book(request, book_id: uuid.UUID) -> Book:
+            return Book(id=book_id, title="B", chapters=[])
+
+        @api.reset_relationship("books", "chapters")
+        def reset_book_chapters(request, book_id: uuid.UUID, chapter_ids: list[int]) -> None:
+            pass
+
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            uid = uuid.uuid4()
+            request = factory.get(f"/books/{uid}")
+            response = get_book(request, book_id=uid)
+
+        body = json.loads(response.content)
+        rel = body["data"]["relationships"]["chapters"]
+        assert "links" in rel
+        assert "self" in rel["links"]
+        assert rel["links"]["self"] == f"/books/{uid}/relationships/chapters"
+
+    def test_both_links_for_plural(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Chapter(Resource):
+            _type: ClassVar = "chapters"
+            id: uuid.UUID
+            title: str
+
+        class Book(Resource):
+            _type: ClassVar = "books"
+            _attributes: ClassVar = ["title"]
+            _plural_relationships: ClassVar = [("chapters", "chapters")]
+            id: uuid.UUID
+            title: str
+            chapters: list[uuid.UUID] = field(default_factory=list)
+
+        @api.get_one("books")
+        def get_book(request, book_id: uuid.UUID) -> Book:
+            return Book(id=book_id, title="B", chapters=[])
+
+        @api.get_relationship("books", "chapters")
+        def get_book_chapters(request, book_id: uuid.UUID) -> list[Chapter]:
+            return []
+
+        @api.reset_relationship("books", "chapters")
+        def reset_book_chapters(request, book_id: uuid.UUID, chapter_ids: list[int]) -> None:
+            pass
+
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            uid = uuid.uuid4()
+            request = factory.get(f"/books/{uid}")
+            response = get_book(request, book_id=uid)
+
+        body = json.loads(response.content)
+        rel = body["data"]["relationships"]["chapters"]
+        assert "links" in rel
+        assert rel["links"]["related"] == f"/books/{uid}/chapters"
+        assert rel["links"]["self"] == f"/books/{uid}/relationships/chapters"
+
+    def test_plural_links_in_list_response(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Chapter(Resource):
+            _type: ClassVar = "chapters"
+            id: int
+            title: str
+
+        class Book(Resource):
+            _type: ClassVar = "books"
+            _attributes: ClassVar = ["title"]
+            _plural_relationships: ClassVar = [("chapters", "chapters")]
+            id: uuid.UUID
+            title: str
+            chapters: list[int] = field(default_factory=list)
+
+        @api.get_many("books")
+        def list_books(request) -> list[Book]:
+            return [Book(id=uuid.uuid4(), title="B1"), Book(id=uuid.uuid4(), title="B2")]
+
+        @api.get_relationship("books", "chapters")
+        def get_book_chapters(request, book_id: uuid.UUID) -> list[Chapter]:
+            return []
+
+        urlconf = _make_urlconf(api)
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get("/books/")
+            response = list_books(request)
+
+        body = json.loads(response.content)
+        for item in body["data"]:
+            rel = item["relationships"]["chapters"]
+            assert "links" in rel
+            assert "related" in rel["links"]
+            assert rel["links"]["related"].startswith("/books/")
+
+
+class TestPluralRelationshipMgmt:
+    def test_reset_relationship_sends_list_of_ints(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.reset_relationship("books", "chapters")
+        def reset_book_chapters(request, book_id: uuid.UUID, chapter_ids: list[int]) -> None:
+            calls.append(chapter_ids)
+
+        uid = uuid.uuid4()
+        request = factory.patch(
+            "/",
+            data=json.dumps({"data": [{"id": 1, "type": "chapters"}, {"id": 2, "type": "chapters"}]}),
+            content_type="application/vnd.api+json",
+        )
+        response = reset_book_chapters(request, book_id=uid)
+
+        assert response.status_code == 204
+        assert calls == [[1, 2]]
+
+    def test_add_to_relationship_sends_list_of_ints(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.add_to_relationship("books", "chapters")
+        def add_book_chapters(request, book_id: uuid.UUID, chapter_ids: list[int]) -> None:
+            calls.append(chapter_ids)
+
+        uid = uuid.uuid4()
+        request = factory.post(
+            "/",
+            data=json.dumps({"data": [{"id": 3, "type": "chapters"}]}),
+            content_type="application/vnd.api+json",
+        )
+        response = add_book_chapters(request, book_id=uid)
+
+        assert response.status_code == 204
+        assert calls == [[3]]
+
+    def test_remove_from_relationship_sends_list_of_ints(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+        calls = []
+
+        @api.remove_from_relationship("books", "chapters")
+        def remove_book_chapters(request, book_id: uuid.UUID, chapter_ids: list[int]) -> None:
+            calls.append(chapter_ids)
+
+        uid = uuid.uuid4()
+        request = factory.delete(
+            "/",
+            data=json.dumps({"data": [{"id": 1, "type": "chapters"}]}),
+            content_type="application/vnd.api+json",
+        )
+        response = remove_book_chapters(request, book_id=uid)
+
+        assert response.status_code == 204
+        assert calls == [[1]]
+
+    def test_openapi_spec_includes_plural_links(self):
+        api = DjsonApi()
+
+        class Chapter(Resource):
+            _type: ClassVar = "chapters"
+            id: int
+            title: str
+
+        class Book(Resource):
+            _type: ClassVar = "books"
+            _attributes: ClassVar = ["title"]
+            _plural_relationships: ClassVar = [("chapters", "chapters")]
+            id: int
+            title: str
+            chapters: list[int] = field(default_factory=list)
+
+        @api.get_one("books")
+        def get_book(request, book_id: int) -> Book:
+            return Book(id=1, title="B")
+
+        @api.get_many("books")
+        def list_books(request) -> list[Book]:
+            return []
+
+        @api.create_one("books")
+        def create_book(request, payload: Book) -> Book:
+            return Book(id=1, title="B")
+
+        @api.edit_one("books")
+        def edit_book(request, book_id: int, payload: Book) -> Book:
+            return Book(id=1, title="B")
+
+        @api.get_relationship("books", "chapters")
+        def get_book_chapters(request, book_id: int) -> list[Chapter]:
+            return []
+
+        @api.reset_relationship("books", "chapters")
+        def reset_book_chapters(request, book_id: int, chapter_ids: list[int]) -> None:
+            pass
+
+        spec = api._build_openapi_spec()
+        book_schema = spec["components"]["schemas"]["books_resource"]
+        categories_rel = book_schema["properties"]["relationships"]["properties"]["chapters"]
+
+        assert "links" in categories_rel["properties"]
+        links = categories_rel["properties"]["links"]["properties"]
+        assert "related" in links
+        assert "self" in links
+
+    def test_openapi_spec_plural_links_only_related(self):
+        """Only related link when no management endpoint."""
+        api = DjsonApi()
+
+        class Chapter(Resource):
+            _type: ClassVar = "chapters"
+            id: int
+            title: str
+
+        class Book(Resource):
+            _type: ClassVar = "books"
+            _attributes: ClassVar = ["title"]
+            _plural_relationships: ClassVar = [("chapters", "chapters")]
+            id: int
+            title: str
+            chapters: list[int] = field(default_factory=list)
+
+        @api.get_one("books")
+        def get_book(request, book_id: int) -> Book:
+            return Book(id=1, title="B")
+
+        @api.get_relationship("books", "chapters")
+        def get_book_chapters(request, book_id: int) -> list[Chapter]:
+            return []
+
+        spec = api._build_openapi_spec()
+        book_schema = spec["components"]["schemas"]["books_resource"]
+        chapters_rel = book_schema["properties"]["relationships"]["properties"]["chapters"]
+        links = chapters_rel["properties"]["links"]["properties"]
+        assert "related" in links
+        assert "self" not in links
     def test_not_found_renders_correctly(self):
         api = DjsonApi()
         factory = RequestFactory()
