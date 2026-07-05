@@ -12,7 +12,13 @@ from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.urls import NoReverseMatch, path, reverse
 
-from .exceptions import DjsonApiException, InternalServerError
+from .exceptions import (
+    DjsonApiException,
+    DjsonApiExceptionSingle,
+    InternalServerError,
+    _class_name_to_code,
+    _class_name_to_title,
+)
 from .resource import Resource
 from .response import Response
 
@@ -267,7 +273,9 @@ class DjsonApi:
     def __init__(self):
         self._registry = []
 
-    def get_one(self, type_name: str) -> Callable[..., Any]:
+    def get_one(
+        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+    ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             url_name = f"get_one__{type_name}"
             sig = inspect.signature(handler)
@@ -395,13 +403,16 @@ class DjsonApi:
                     "pk_name": pk_name,
                     "pk_type": pk_type,
                     "resource_class": resource_class,
+                    "errors": errors or [],
                 }
             )
             return wrapper
 
         return decorator
 
-    def get_many(self, type_name: str) -> Callable[..., Any]:
+    def get_many(
+        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+    ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             _validate_handler_params(handler)
             url_name = f"get_many__{type_name}"
@@ -517,13 +528,16 @@ class DjsonApi:
                     "method": "get_many",
                     "handler": wrapper,
                     "resource_class": resource_class,
+                    "errors": errors or [],
                 }
             )
             return wrapper
 
         return decorator
 
-    def create_one(self, type_name: str) -> Callable[..., Any]:
+    def create_one(
+        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+    ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             _validate_handler_params(handler)
             url_name = f"create_one__{type_name}"
@@ -669,13 +683,16 @@ class DjsonApi:
                     "method": "create_one",
                     "handler": wrapper,
                     "resource_class": resource_class,
+                    "errors": errors or [],
                 }
             )
             return wrapper
 
         return decorator
 
-    def edit_one(self, type_name: str) -> Callable[..., Any]:
+    def edit_one(
+        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+    ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             url_name = f"edit_one__{type_name}"
             sig = inspect.signature(handler)
@@ -839,13 +856,16 @@ class DjsonApi:
                     "pk_name": pk_name,
                     "pk_type": pk_type,
                     "resource_class": resource_class,
+                    "errors": errors or [],
                 }
             )
             return wrapper
 
         return decorator
 
-    def delete_one(self, type_name: str) -> Callable[..., Any]:
+    def delete_one(
+        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+    ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             url_name = f"delete_one__{type_name}"
             sig = inspect.signature(handler)
@@ -915,6 +935,7 @@ class DjsonApi:
                     "handler": wrapper,
                     "pk_name": pk_name,
                     "pk_type": pk_type,
+                    "errors": errors or [],
                 }
             )
             return wrapper
@@ -922,7 +943,8 @@ class DjsonApi:
         return decorator
 
     def _make_relationship_mgmt_wrapper(
-        self, handler, type_name, rel_name, pk_param, rel_id_param, is_plural, method_name
+        self, handler, type_name, rel_name, pk_param, rel_id_param, is_plural, method_name,
+        errors=None,
     ):
         pk_name = pk_param.name
         pk_type = pk_param.annotation if pk_param.annotation != inspect.Parameter.empty else str
@@ -1045,11 +1067,14 @@ class DjsonApi:
                 "handler": wrapper,
                 "pk_name": pk_name,
                 "pk_type": pk_type,
+                "errors": errors or [],
             }
         )
         return wrapper
 
-    def edit_relationship(self, type_name: str, rel_name: str) -> Callable[..., Any]:
+    def edit_relationship(
+        self, type_name: str, rel_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+    ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             sig = inspect.signature(handler)
             params = list(sig.parameters.values())
@@ -1059,10 +1084,13 @@ class DjsonApi:
             return self._make_relationship_mgmt_wrapper(
                 handler, type_name, rel_name, pk_param, rel_id_param,
                 is_plural=False, method_name="edit_relationship",
+                errors=errors,
             )
         return decorator
 
-    def reset_relationship(self, type_name: str, rel_name: str) -> Callable[..., Any]:
+    def reset_relationship(
+        self, type_name: str, rel_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+    ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             sig = inspect.signature(handler)
             params = list(sig.parameters.values())
@@ -1072,10 +1100,13 @@ class DjsonApi:
             return self._make_relationship_mgmt_wrapper(
                 handler, type_name, rel_name, pk_param, rel_id_param,
                 is_plural=True, method_name="reset_relationship",
+                errors=errors,
             )
         return decorator
 
-    def add_to_relationship(self, type_name: str, rel_name: str) -> Callable[..., Any]:
+    def add_to_relationship(
+        self, type_name: str, rel_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+    ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             sig = inspect.signature(handler)
             params = list(sig.parameters.values())
@@ -1085,10 +1116,13 @@ class DjsonApi:
             return self._make_relationship_mgmt_wrapper(
                 handler, type_name, rel_name, pk_param, rel_id_param,
                 is_plural=True, method_name="add_to_relationship",
+                errors=errors,
             )
         return decorator
 
-    def remove_from_relationship(self, type_name: str, rel_name: str) -> Callable[..., Any]:
+    def remove_from_relationship(
+        self, type_name: str, rel_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+    ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             sig = inspect.signature(handler)
             params = list(sig.parameters.values())
@@ -1098,10 +1132,13 @@ class DjsonApi:
             return self._make_relationship_mgmt_wrapper(
                 handler, type_name, rel_name, pk_param, rel_id_param,
                 is_plural=True, method_name="remove_from_relationship",
+                errors=errors,
             )
         return decorator
 
-    def get_relationship(self, type_name: str, rel_name: str) -> Callable[..., Any]:
+    def get_relationship(
+        self, type_name: str, rel_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+    ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             url_name = f"get_relationship__{type_name}__{rel_name}"
             sig = inspect.signature(handler)
@@ -1264,6 +1301,7 @@ class DjsonApi:
                     "pk_type": pk_type,
                     "resource_class": resource_class,
                     "is_plural": is_plural,
+                    "errors": errors or [],
                 }
             )
             return wrapper
@@ -1692,6 +1730,42 @@ class DjsonApi:
                         "204": {"description": "No Content"},
                     },
                 }
+            if entry.get("errors"):
+                method = entry["method"]
+                _ENTRY_METHOD_TO_HTTP = {
+                    "get_one": "get", "get_many": "get", "create_one": "post",
+                    "edit_one": "patch", "delete_one": "delete",
+                    "get_relationship": "get", "edit_relationship": "patch",
+                    "reset_relationship": "patch", "add_to_relationship": "post",
+                    "remove_from_relationship": "delete",
+                }
+                http_method = _ENTRY_METHOD_TO_HTTP[method]
+                if method in ("get_one", "edit_one", "delete_one"):
+                    pk_name = entry["pk_name"]
+                    path_str = f"/{type_name}/{{{pk_name}}}"
+                elif method in ("get_many", "create_one"):
+                    path_str = f"/{type_name}/"
+                elif method == "get_relationship":
+                    path_str = f"/{type_name}/{{{entry['pk_name']}}}/{entry['rel_name']}"
+                elif method in ("edit_relationship", "reset_relationship", "add_to_relationship", "remove_from_relationship"):
+                    path_str = f"/{type_name}/{{{entry['pk_name']}}}/relationships/{entry['rel_name']}"
+                else:
+                    path_str = None
+                if path_str:
+                    op = spec["paths"][path_str].get(http_method)
+                    if op:
+                        for ex_class in entry["errors"]:
+                            schema_name = _build_error_schema(ex_class, spec)
+                            status_code = str(ex_class.STATUS)
+                            ex_title = ex_class.TITLE if ex_class.TITLE is not None else _class_name_to_title(ex_class.__name__)
+                            op["responses"][status_code] = {
+                                "description": ex_title,
+                                "content": {
+                                    "application/vnd.api+json": {
+                                        "schema": {"$ref": f"#/components/schemas/{schema_name}"}
+                                    }
+                                },
+                            }
         schema_names = list(spec["components"]["schemas"].keys())
         if schema_names:
             endpoint_tags = sorted(set(entry["type_name"] for entry in self._registry))
@@ -1846,6 +1920,42 @@ def _response_schema(type_name, resource_class, type_to_endpoint, spec, rel_mgmt
             },
         },
     }
+
+
+_ERROR_STATUS_MAP: dict[int, list[type[DjsonApiExceptionSingle]]] = {}
+for _cls in DjsonApiExceptionSingle.__subclasses__():
+    _ERROR_STATUS_MAP.setdefault(int(_cls.STATUS), []).append(_cls)
+
+
+def _build_error_schema(ex_class: type[DjsonApiExceptionSingle], spec: dict) -> str:
+    schema_name = f"{ex_class.__name__}_error"
+    if schema_name not in spec["components"]["schemas"]:
+        code = ex_class.CODE if ex_class.CODE is not None else _class_name_to_code(ex_class.__name__)
+        title = ex_class.TITLE if ex_class.TITLE is not None else _class_name_to_title(ex_class.__name__)
+        error_props: dict = {
+            "status": {"type": "string", "const": str(ex_class.STATUS)},
+            "code": {"type": "string", "const": code},
+            "title": {"type": "string", "const": title},
+            "detail": {"type": "string"},
+        }
+        if ex_class.STATUS == 400:
+            error_props["source"] = {
+                "type": "object",
+                "properties": {"pointer": {"type": "string"}},
+            }
+        spec["components"]["schemas"][schema_name] = {
+            "type": "object",
+            "properties": {
+                "errors": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": error_props,
+                    },
+                }
+            },
+        }
+    return schema_name
 
 
 class _CombinedView:

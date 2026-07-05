@@ -62,7 +62,7 @@ def list_articles(request: HttpRequest) -> list[ArticleResource]:
 - [x] Compound documents (`include` param + `included` field in response)
 - [x] Sparse fieldsets (`fields[type]=...`)
 - [x] Sorting (`sort=...`)
+- [x] Error responses in the openapi spec
 - [ ] Pagination (for get_many)
 - [ ] Mapping `/articles?filter[author]=...` to related resource URL
-- [ ] Error responses in the openapi spec
 - [ ] Authentication

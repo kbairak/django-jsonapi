@@ -1,7 +1,7 @@
 from django.http import HttpRequest
 
 from djsonapi import DjsonApi, Response
-from djsonapi.exceptions import NotFound
+from djsonapi.exceptions import NotFound, Conflict
 
 from .models import Article, User
 from .resources import ArticleResource, UserResource
@@ -9,7 +9,7 @@ from .resources import ArticleResource, UserResource
 api = DjsonApi()
 
 
-@api.get_one("articles")
+@api.get_one("articles", errors=[NotFound])
 def get_article(request: HttpRequest, article_id: int) -> ArticleResource:
     try:
         article = Article.objects.get(id=article_id)
@@ -73,7 +73,7 @@ def create_article(request: HttpRequest, payload: ArticleResource) -> ArticleRes
     )
 
 
-@api.edit_one("articles")
+@api.edit_one("articles", errors=[NotFound, Conflict])
 def edit_article(request: HttpRequest, article_id: int, payload: ArticleResource) -> ArticleResource:
     try:
         article = Article.objects.get(id=article_id)

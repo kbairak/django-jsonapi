@@ -12,7 +12,7 @@ from django.test import RequestFactory
 from django.test.utils import override_settings
 
 from djsonapi import DjsonApi, Resource
-from djsonapi.exceptions import NotFound
+from djsonapi.exceptions import NotFound, TooManyRequests
 from djsonapi.response import Response
 
 settings.configure(
@@ -1239,6 +1239,56 @@ class TestEditRelationship:
         op = spec["paths"]["/articles/{article_id}/relationships/author"]["patch"]
         assert op["tags"] == ["articles"]
 
+
+class TestOpenAPIErrorResponses:
+    def test_error_response_in_openapi_spec(self):
+        api = DjsonApi()
+
+        @api.get_one("articles", errors=[NotFound, TooManyRequests])
+        def view(request, article_id: int) -> Article:
+            return Article(id=uuid.uuid4(), title="T", content="C")
+
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles/{article_id}"]["get"]
+
+        assert "404" in op["responses"]
+        assert op["responses"]["404"]["description"] == "Not found"
+        assert "$ref" in op["responses"]["404"]["content"]["application/vnd.api+json"]["schema"]
+
+        assert "429" in op["responses"]
+        assert op["responses"]["429"]["description"] == "Too many requests"
+
+    def test_error_response_schema_contents(self):
+        api = DjsonApi()
+
+        @api.get_one("articles", errors=[NotFound])
+        def view(request, article_id: int) -> Article:
+            return Article(id=uuid.uuid4(), title="T", content="C")
+
+        spec = api._build_openapi_spec()
+        schema = spec["components"]["schemas"]["NotFound_error"]
+        error_obj = schema["properties"]["errors"]["items"]["properties"]
+
+        assert error_obj["status"]["const"] == "404"
+        assert error_obj["code"]["const"] == "not_found"
+        assert error_obj["title"]["const"] == "Not found"
+        assert "detail" in error_obj
+
+    def test_error_schema_for_400_includes_source(self):
+        from djsonapi.exceptions import BadRequest
+
+        api = DjsonApi()
+
+        @api.get_one("articles", errors=[BadRequest])
+        def view(request, article_id: int) -> Article:
+            return Article(id=uuid.uuid4(), title="T", content="C")
+
+        spec = api._build_openapi_spec()
+        schema = spec["components"]["schemas"]["BadRequest_error"]
+        error_obj = schema["properties"]["errors"]["items"]["properties"]
+
+        assert "source" in error_obj
+        assert "pointer" in error_obj["source"]["properties"]
 
 
 class TestGetOne:
