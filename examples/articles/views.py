@@ -127,3 +127,13 @@ def get_article_author(request: HttpRequest, article_id: int) -> UserResource:
         username=article.author.username,
         email=article.author.email,
     )
+
+
+@api.edit_relationship("articles", "author")
+def edit_article_author(request: HttpRequest, article_id: int, author_id: int) -> None:
+    try:
+        article = Article.objects.get(id=article_id)
+    except Article.DoesNotExist:
+        raise NotFound(f"Article with id '{article_id}' not found")
+    article.author_id = author_id
+    article.save()

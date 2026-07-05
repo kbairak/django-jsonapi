@@ -50,20 +50,19 @@ def list_articles(request: HttpRequest) -> list[ArticleResource]:
 
 - [x] `create_one` — `POST /articles`
 - [x] ReDoc docs UI at `/docs`
-- [ ] Filters and other GET variables (for get_many)
-- [ ] `edit_one` — `PATCH /articles/:id`
-- [ ] `delete_one` — `DELETE /articles/:id`
-- [ ] `get_relationship` (singular) — `GET /articles/:id/relationships/author`
-- [ ] `get_relationship` (plural) — `GET /articles/:id/relationships/tags`
-- [ ] `edit_relationship` (singular) — `PATCH /articles/:id/relationships/author`
-- [ ] `add_to_relationship` (plural) — `POST /articles/:id/relationships/tags`
-- [ ] `remove_from_relationship` (plural) — `DELETE /articles/:id/relationships/tags`
-- [ ] `reset_relationship` (plural) — `PATCH /articles/:id/relationships/tags`
-- [ ] Compound documents (`include` param + `included` field in response)
-- [ ] Sparse fieldsets (`fields[type]=...`)
-- [ ] Sorting (`sort=...`)
+- [x] Filters and other GET variables (for get_many)
+- [x] `edit_one` — `PATCH /articles/:id`
+- [x] `delete_one` — `DELETE /articles/:id`
+- [x] `get_relationship` (singular) — `GET /articles/:id/relationships/author`
+- [x] `get_relationship` (plural) — `GET /articles/:id/relationships/tags`
+- [x] `edit_relationship` (singular) — `PATCH /articles/:id/relationships/author`
+- [x] `add_to_relationship` (plural) — `POST /articles/:id/relationships/tags`
+- [x] `remove_from_relationship` (plural) — `DELETE /articles/:id/relationships/tags`
+- [x] `reset_relationship` (plural) — `PATCH /articles/:id/relationships/tags`
+- [x] Compound documents (`include` param + `included` field in response)
+- [x] Sparse fieldsets (`fields[type]=...`)
+- [x] Sorting (`sort=...`)
 - [ ] Pagination (for get_many)
 - [ ] Mapping `/articles?filter[author]=...` to related resource URL
 - [ ] Error responses in the openapi spec
 - [ ] Authentication
-

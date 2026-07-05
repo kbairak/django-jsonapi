@@ -1092,6 +1092,155 @@ class TestGetRelationship:
             def view(request, article_id: int, bad_param: str) -> Article: ...
 
 
+class TestEditRelationship:
+    def test_url_registered(self):
+        api = DjsonApi()
+
+        @api.edit_relationship("articles", "author")
+        def view(request, article_id: int, author_id: int) -> None: ...
+
+        urls = api.urls
+        assert any(u.name == "edit_relationship__articles__author" for u in urls)
+
+    def test_handler_called_with_correct_args(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        calls = []
+
+        @api.edit_relationship("articles", "author")
+        def view(request, article_id: int, author_id: int) -> None:
+            calls.append((request, article_id, author_id))
+
+        request = factory.patch(
+            "/articles/1/relationships/author",
+            json.dumps({"data": {"id": 2, "type": "authors"}}),
+            content_type="application/vnd.api+json",
+        )
+        view(request, article_id=1)
+
+        assert len(calls) == 1
+        assert calls[0] == (request, 1, 2)
+
+    def test_response_is_204(self):
+        api = DjsonApi()
+
+        @api.edit_relationship("articles", "author")
+        def view(request, article_id: int, author_id: int) -> None: ...
+
+        factory = RequestFactory()
+        request = factory.patch(
+            "/articles/1/relationships/author",
+            json.dumps({"data": {"id": 2, "type": "authors"}}),
+            content_type="application/vnd.api+json",
+        )
+        response = view(request, article_id=1)
+
+        assert response.status_code == 204
+
+    def test_body_without_data_returns_400(self):
+        api = DjsonApi()
+
+        @api.edit_relationship("articles", "author")
+        def view(request, article_id: int, author_id: int) -> None: ...
+
+        factory = RequestFactory()
+        request = factory.patch(
+            "/articles/1/relationships/author",
+            json.dumps({}),
+            content_type="application/vnd.api+json",
+        )
+        response = view(request, article_id=1)
+
+        assert response.status_code == 400
+
+    def test_nullable_allows_data_null(self):
+        api = DjsonApi()
+
+        calls = []
+
+        @api.edit_relationship("articles", "author")
+        def view(request, article_id: int, author_id: int | None) -> None:
+            calls.append(author_id)
+
+        factory = RequestFactory()
+        request = factory.patch(
+            "/articles/1/relationships/author",
+            json.dumps({"data": None}),
+            content_type="application/vnd.api+json",
+        )
+        response = view(request, article_id=1)
+
+        assert response.status_code == 204
+        assert calls == [None]
+
+    def test_non_nullable_rejects_data_null(self):
+        api = DjsonApi()
+
+        @api.edit_relationship("articles", "author")
+        def view(request, article_id: int, author_id: int) -> None: ...
+
+        factory = RequestFactory()
+        request = factory.patch(
+            "/articles/1/relationships/author",
+            json.dumps({"data": None}),
+            content_type="application/vnd.api+json",
+        )
+        response = view(request, article_id=1)
+
+        assert response.status_code == 400
+
+    def test_self_link_in_get_one_response(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class Author(Resource):
+            _type: ClassVar = "authors"
+            id: uuid.UUID
+            name: str
+
+        class Book(Resource):
+            _type: ClassVar = "books"
+            _attributes: ClassVar = ["title"]
+            _singular_relationships: ClassVar = [("author", "authors")]
+            id: uuid.UUID
+            title: str
+            author: uuid.UUID
+
+        @api.edit_relationship("books", "author")
+        def edit_book_author(request, book_id: uuid.UUID, author_id: uuid.UUID) -> None: ...
+
+        book_id = uuid.uuid4()
+
+        @api.get_one("books")
+        def get_book(request, book_id: uuid.UUID) -> Book:
+            return Book(id=book_id, title="B1", author=uuid.uuid4())
+
+        urlconf = _make_urlconf(api)
+
+        with override_settings(ROOT_URLCONF=urlconf):
+            request = factory.get(f"/books/{book_id}")
+            response = get_book(request, book_id=book_id)
+
+        body = json.loads(response.content)
+        rel = body["data"]["relationships"]["author"]
+        assert "links" in rel
+        assert "self" in rel["links"]
+        assert rel["links"]["self"] == f"/books/{book_id}/relationships/author"
+
+    def test_openapi_spec_includes_path(self):
+        api = DjsonApi()
+
+        @api.edit_relationship("articles", "author")
+        def view(request, article_id: int, author_id: int) -> None: ...
+
+        spec = api._build_openapi_spec()
+        assert "/articles/{article_id}/relationships/author" in spec["paths"]
+        op = spec["paths"]["/articles/{article_id}/relationships/author"]["patch"]
+        assert op["tags"] == ["articles"]
+
+
+
 class TestGetOne:
     def test_handler_called_with_correct_args(self):
         api = DjsonApi()
