@@ -1,0 +1,28 @@
+[project]
+name = "djsonapi"
+version = "0.1.0"
+description = "JSON:API framework for Django"
+readme = "README.md"
+authors = [
+    { name = "Konstantinos Bairaktaris", email = "ikijob@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = ["django>=4.2"]
+
+[project.scripts]
+djsonapi = "djsonapi:main"
+
+[tool.ruff]
+line-length = 99
+
+[tool.ruff.lint]
+extend-select = ["I"]
+
+[build-system]
+requires = ["uv_build>=0.11.25,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
