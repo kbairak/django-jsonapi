@@ -48,8 +48,9 @@ def list_articles(request: HttpRequest) -> list[ArticleResource]:
 
 ## TODO
 
-- [ ] `create_one` — `POST /articles`
-- [ ] ReDoc docs UI at `/docs`
+- [x] `create_one` — `POST /articles`
+- [x] ReDoc docs UI at `/docs`
+- [ ] Filters and other GET variables (for get_many)
 - [ ] `edit_one` — `PATCH /articles/:id`
 - [ ] `delete_one` — `DELETE /articles/:id`
 - [ ] `get_relationship` (singular) — `GET /articles/:id/relationships/author`
@@ -61,7 +62,6 @@ def list_articles(request: HttpRequest) -> list[ArticleResource]:
 - [ ] Compound documents (`include` param + `included` field in response)
 - [ ] Sparse fieldsets (`fields[type]=...`)
 - [ ] Sorting (`sort=...`)
-- [ ] Filters and other GET variables (for get_many)
 - [ ] Pagination (for get_many)
 - [ ] Mapping `/articles?filter[author]=...` to related resource URL
 - [ ] Error responses in the openapi spec

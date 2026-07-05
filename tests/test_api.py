@@ -49,7 +49,7 @@ class TestUrls:
         def view(request, article_id: uuid.UUID) -> Article: ...
 
         urls = api.urls
-        assert len(urls) == 2
+        assert len(urls) == 3
         assert urls[0].name == "get_one__articles"
         assert urls[0].pattern.regex.pattern is not None
 
@@ -60,7 +60,7 @@ class TestUrls:
         def view(request) -> list[Article]: ...
 
         urls = api.urls
-        assert len(urls) == 2
+        assert len(urls) == 3
         assert urls[0].name == "get_many__articles"
         assert urls[0].pattern.regex.pattern is not None
 
@@ -83,7 +83,7 @@ class TestCreateOne:
         def view(request: HttpRequest, payload: Article) -> Article: ...
 
         urls = api.urls
-        assert len(urls) == 2
+        assert len(urls) == 3
         assert any(u.name == "create_one__articles" for u in urls)
 
     def test_201_response_with_location(self):

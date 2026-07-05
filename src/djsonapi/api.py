@@ -6,9 +6,8 @@ from collections.abc import Callable
 from typing import Any, get_args, get_origin
 
 import jsonschema
-
 from django.core.exceptions import ImproperlyConfigured
-from django.http import HttpRequest, JsonResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.urls import NoReverseMatch, path, reverse
 
 from .exceptions import DjsonApiException, InternalServerError
@@ -223,7 +222,11 @@ class DjsonApi:
                         return _create_response(result, type_name, self._type_to_endpoint())
                     except json_module.JSONDecodeError as exc:
                         return JsonResponse(
-                            {"errors": [{"status": "400", "title": "Bad request", "detail": str(exc)}]},
+                            {
+                                "errors": [
+                                    {"status": "400", "title": "Bad request", "detail": str(exc)}
+                                ]
+                            },
                             status=400,
                         )
                     except jsonschema.ValidationError as exc:
@@ -263,7 +266,11 @@ class DjsonApi:
                         return _create_response(result, type_name, self._type_to_endpoint())
                     except json_module.JSONDecodeError as exc:
                         return JsonResponse(
-                            {"errors": [{"status": "400", "title": "Bad request", "detail": str(exc)}]},
+                            {
+                                "errors": [
+                                    {"status": "400", "title": "Bad request", "detail": str(exc)}
+                                ]
+                            },
                             status=400,
                         )
                     except jsonschema.ValidationError as exc:
@@ -313,13 +320,22 @@ class DjsonApi:
                 pk_name = entry["pk_name"]
                 django_type = _PYTHON_TO_DJANGO_PATH.get(entry["pk_type"], "str")
                 path_str = f"{type_name}/<{django_type}:{pk_name}>"
-                groups.setdefault(path_str, {})["GET"] = (entry["handler"], f"get_one__{type_name}")
+                groups.setdefault(path_str, {})["GET"] = (
+                    entry["handler"],
+                    f"get_one__{type_name}",
+                )
             elif entry["method"] == "get_many":
                 path_str = f"{type_name}/"
-                groups.setdefault(path_str, {})["GET"] = (entry["handler"], f"get_many__{type_name}")
+                groups.setdefault(path_str, {})["GET"] = (
+                    entry["handler"],
+                    f"get_many__{type_name}",
+                )
             elif entry["method"] == "create_one":
                 path_str = f"{type_name}/"
-                groups.setdefault(path_str, {})["POST"] = (entry["handler"], f"create_one__{type_name}")
+                groups.setdefault(path_str, {})["POST"] = (
+                    entry["handler"],
+                    f"create_one__{type_name}",
+                )
         result = []
         for path_str, methods in groups.items():
             if len(methods) == 1:
@@ -329,6 +345,7 @@ class DjsonApi:
                 dispatch = _CombinedView({m: h for m, (h, _) in methods.items()})
                 for _, name in methods.values():
                     result.append(path(path_str, dispatch, name=name))
+        result.append(path("openapi.json", self._openapi_view, name="openapi"))
         result.append(path("docs/", self._docs_view, name="docs"))
         return result
 
@@ -343,8 +360,27 @@ class DjsonApi:
             }
         return result
 
-    def _docs_view(self, request: HttpRequest) -> JsonResponse:
+    def _openapi_view(self, request: HttpRequest) -> JsonResponse:
         return JsonResponse(self._build_openapi_spec())
+
+    def _docs_view(self, request: HttpRequest) -> HttpResponse:
+        try:
+            openapi_url = reverse("openapi")
+        except (NoReverseMatch, ImproperlyConfigured):
+            openapi_url = "/openapi.json"
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <title>API Docs</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+  <redoc spec-url='{openapi_url}'></redoc>
+  <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+</body>
+</html>"""
+        return HttpResponse(html.encode(), content_type="text/html")
 
     def _build_openapi_spec(self) -> dict:
         spec: dict = {
@@ -357,6 +393,8 @@ class DjsonApi:
             type_name = entry["type_name"]
             resource_class = entry.get("resource_class")
             type_to_endpoint = self._type_to_endpoint()
+            raw_name = entry["handler"].__name__.replace("_", " ")
+            summary = raw_name[0].upper() + raw_name[1:] if raw_name else raw_name
 
             if entry["method"] == "get_one":
                 pk_name = entry["pk_name"]
@@ -369,8 +407,12 @@ class DjsonApi:
                     param_schema["format"] = "uuid"
                 response_schema: dict = {}
                 if resource_class:
-                    response_schema = _response_schema(type_name, resource_class, type_to_endpoint, spec)
+                    response_schema = _response_schema(
+                        type_name, resource_class, type_to_endpoint, spec
+                    )
                 path_item["get"] = {
+                    "tags": [type_name],
+                    "summary": summary,
                     "parameters": [
                         {
                             "name": pk_name,
@@ -389,34 +431,17 @@ class DjsonApi:
                             },
                         }
                     },
-                }
-
+}
+ 
             elif entry["method"] == "get_many":
                 path_str = f"/{type_name}/"
                 path_item = spec["paths"].setdefault(path_str, {})
-                response_schema: dict = {}
-                if resource_class:
-                    response_array_schema = {
-                        "type": "object",
-                        "properties": {
-                            "data": {
-                                "type": "array",
-                                "items": {"$ref": f"#/components/schemas/{type_name}_resource"},
-                            },
-                            "jsonapi": {
-                                "type": "object",
-                                "properties": {"version": {"const": "1.0"}},
-                            },
-                        },
-                    }
-                    _ensure_schema(type_name, resource_class, type_to_endpoint, spec)
-                    response_schema = response_array_schema
-
-            elif entry["method"] == "get_many":
-                path_str = f"/{type_name}/"
-                path_item = spec["paths"].setdefault(path_str, {})
-                response_schema = _response_schema(type_name, resource_class, type_to_endpoint, spec)
+                response_schema = _response_schema(
+                    type_name, resource_class, type_to_endpoint, spec
+                )
                 path_item["get"] = {
+                    "tags": [type_name],
+                    "summary": summary,
                     "responses": {
                         "200": {
                             "description": "OK",
@@ -434,13 +459,19 @@ class DjsonApi:
                 path_item = spec["paths"].setdefault(path_str, {})
                 response_schema: dict = {}
                 if resource_class:
-                    response_schema = _response_schema(type_name, resource_class, type_to_endpoint, spec)
+                    response_schema = _response_schema(
+                        type_name, resource_class, type_to_endpoint, spec
+                    )
                 path_item["post"] = {
+                    "tags": [type_name],
+                    "summary": summary,
                     "requestBody": {
                         "required": True,
                         "content": {
                             "application/vnd.api+json": {
-                                "schema": resource_class.jsonschema_create() if resource_class else {"type": "object"},
+                                "schema": resource_class.jsonschema_create()
+                                if resource_class
+                                else {"type": "object"},
                             }
                         },
                     },

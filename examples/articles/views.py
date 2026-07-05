@@ -71,7 +71,4 @@ def get_user(request: HttpRequest, user_id: int) -> UserResource:
 @api.get_many("users")
 def list_users(request: HttpRequest) -> list[UserResource]:
     users = User.objects.all()
-    return [
-        UserResource(id=user.id, username=user.username, email=user.email)
-        for user in users
-    ]
+    return [UserResource(id=user.id, username=user.username, email=user.email) for user in users]
