@@ -584,6 +584,302 @@ class TestEditOne:
         assert response.status_code == 200
 
 
+class TestPartialEdit:
+    """Partial PATCH body leaves unset fields uninitialized on Resource instance."""
+
+    def test_partial_attributes_leave_other_fields_unset(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        calls: list = []
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _edit_fields: ClassVar = ["id", "title", "content"]
+            id: uuid.UUID
+            title: str
+            content: str
+
+        @api.edit_one("articles")
+        def view(
+            request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle
+        ) -> EditableArticle:
+            calls.append(payload)
+            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
+
+        uid = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "id": str(uid),
+                "attributes": {"title": "Only title sent"},
+            }
+        })
+        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+        view(request, article_id=uid)
+
+        payload = calls[0]
+        assert payload.id == uid
+        assert payload.title == "Only title sent"
+        assert not hasattr(payload, "content")
+
+    def test_partial_relationship_leaves_other_fields_unset(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        calls: list = []
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _singular_relationships: ClassVar = [("author", "authors")]
+            _edit_fields: ClassVar = ["id", "title", "content", "author"]
+            id: uuid.UUID
+            title: str
+            content: str
+            author: int
+
+        @api.edit_one("articles")
+        def view(
+            request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle
+        ) -> EditableArticle:
+            calls.append(payload)
+            return EditableArticle(
+                id=article_id, title=payload.title, content=payload.content, author=payload.author
+            )
+
+        uid = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "id": str(uid),
+                "relationships": {"author": {"data": {"type": "authors", "id": 42}}},
+            }
+        })
+        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+        view(request, article_id=uid)
+
+        payload = calls[0]
+        assert payload.id == uid
+        assert payload.author == 42
+        assert not hasattr(payload, "title")
+        assert not hasattr(payload, "content")
+
+    def test_partial_mixed_attributes_and_relationships(self):
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        calls: list = []
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _singular_relationships: ClassVar = [("author", "authors")]
+            _plural_relationships: ClassVar = [("categories", "categories")]
+            _edit_fields: ClassVar = ["id", "title", "content", "author", "categories"]
+            id: uuid.UUID
+            title: str
+            content: str
+            author: int
+            categories: list[int] = field(default_factory=list)
+
+        @api.edit_one("articles")
+        def view(
+            request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle
+        ) -> EditableArticle:
+            calls.append(payload)
+            return EditableArticle(
+                id=article_id, title=payload.title, content=payload.content, author=payload.author,
+            )
+
+        uid = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "id": str(uid),
+                "attributes": {"title": "T"},
+                "relationships": {
+                    "categories": {"data": [{"type": "categories", "id": 10}, {"type": "categories", "id": 20}]}
+                },
+            }
+        })
+        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+        view(request, article_id=uid)
+
+        payload = calls[0]
+        assert payload.id == uid
+        assert payload.title == "T"
+        assert payload.categories == [10, 20]
+        assert not hasattr(payload, "content")
+        assert not hasattr(payload, "author")
+
+    def test_partial_no_attributes_rejected(self):
+        """PATCH body with empty attributes object rejected (minProperties: 1)."""
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        calls: list = []
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _edit_fields: ClassVar = ["id", "title", "content"]
+            id: uuid.UUID
+            title: str
+            content: str
+
+        @api.edit_one("articles")
+        def view(
+            request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle
+        ) -> EditableArticle:
+            calls.append(payload)
+            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
+
+        uid = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "id": str(uid),
+                "attributes": {},
+            }
+        })
+        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+        response = view(request, article_id=uid)
+
+        assert response.status_code == 400
+        assert len(calls) == 0
+
+    def test_partial_handler_conditional_assign(self):
+        """Handler that guards with hasattr returns 200 and only sets sent fields."""
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _edit_fields: ClassVar = ["id", "title", "content"]
+            id: uuid.UUID
+            title: str
+            content: str
+
+        @api.edit_one("articles")
+        def view(
+            request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle
+        ) -> EditableArticle:
+            result = EditableArticle(id=article_id, title="Default", content="Default")
+            if hasattr(payload, "title"):
+                result.title = payload.title
+            if hasattr(payload, "content"):
+                result.content = payload.content
+            return result
+
+        uid = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "id": str(uid),
+                "attributes": {"content": "Only content changed"},
+            }
+        })
+        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+        response = view(request, article_id=uid)
+
+        assert response.status_code == 200
+        resp_data = json.loads(response.content)
+        assert resp_data["data"]["attributes"]["title"] == "Default"
+        assert resp_data["data"]["attributes"]["content"] == "Only content changed"
+
+    def test_partial_resource_with_defaults(self):
+        """Partial body leaves field accessible via class default, not overwritten."""
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        calls: list = []
+
+        class EditableCategory(Resource):
+            _type: ClassVar = "categories"
+            _attributes: ClassVar = ["name", "slug", "description"]
+            _edit_fields: ClassVar = ["id", "name", "slug", "description"]
+            id: str
+            name: str
+            slug: str
+            description: str = ""
+
+        @api.edit_one("categories")
+        def view(
+            request: HttpRequest, category_id: str, payload: EditableCategory
+        ) -> EditableCategory:
+            calls.append(payload)
+            result = EditableCategory(id=category_id, name="Old", slug="old-slug", description="Old desc")
+            if hasattr(payload, "name"):
+                result.name = payload.name
+            if hasattr(payload, "slug"):
+                result.slug = payload.slug
+            if hasattr(payload, "description"):
+                result.description = payload.description
+            return result
+
+        body = json.dumps({
+            "data": {
+                "type": "categories",
+                "id": "1",
+                "attributes": {"name": "Renamed"},
+            }
+        })
+        request = factory.patch("/categories/1", body, content_type="application/vnd.api+json")
+        response = view(request, category_id="1")
+
+        assert response.status_code == 200
+        resp_data = json.loads(response.content)
+        assert resp_data["data"]["attributes"]["name"] == "Renamed"
+        assert resp_data["data"]["attributes"]["slug"] == "old-slug"
+        # description sentinel: always True due to class default, so description overwritten
+        # This documents the limitation: fields with class defaults aren't
+        # distinguishable from unset fields via hasattr
+        assert resp_data["data"]["attributes"]["description"] == ""
+
+    def test_partial_async_attributes_unset(self):
+        """Async edit_one also leaves unset fields uninitialized."""
+        import asyncio
+
+        api = DjsonApi()
+        factory = RequestFactory()
+
+        calls: list = []
+
+        class EditableArticle(Resource):
+            _type: ClassVar = "articles"
+            _attributes: ClassVar = ["title", "content"]
+            _edit_fields: ClassVar = ["id", "title", "content"]
+            id: uuid.UUID
+            title: str
+            content: str
+
+        @api.edit_one("articles")
+        async def view(
+            request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle
+        ) -> EditableArticle:
+            calls.append(payload)
+            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
+
+        uid = uuid.uuid4()
+        body = json.dumps({
+            "data": {
+                "type": "articles",
+                "id": str(uid),
+                "attributes": {"content": "Only content"},
+            }
+        })
+        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
+        asyncio.run(view(request, article_id=uid))
+
+        payload = calls[0]
+        assert payload.id == uid
+        assert payload.content == "Only content"
+        assert not hasattr(payload, "title")
+
+
 class TestDeleteOne:
     def test_delete_one_url(self):
         api = DjsonApi()

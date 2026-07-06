@@ -30,4 +30,5 @@ dev = [
 
 [tool.pyright]
 typeCheckingMode = "basic"
+reportMissingModuleSource = "none"
 reportUnnecessaryTypeIgnoreComment = false

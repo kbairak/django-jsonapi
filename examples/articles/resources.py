@@ -4,7 +4,7 @@ from typing import ClassVar
 from djsonapi import Resource
 
 
-class ArticleResource(Resource):
+class Article(Resource):
     _type: ClassVar = "articles"
     _attributes: ClassVar = ["title", "content", "created_at"]
     _singular_relationships: ClassVar = [("author", "users")]
@@ -21,7 +21,7 @@ class ArticleResource(Resource):
     categories: list[int] | None = None
 
 
-class CategoryResource(Resource):
+class Category(Resource):
     _type: ClassVar = "categories"
     _attributes: ClassVar = ["name", "slug", "description", "created_at"]
     _plural_relationships: ClassVar = ["articles"]
@@ -37,7 +37,7 @@ class CategoryResource(Resource):
     articles: list[int] | None = None
 
 
-class UserResource(Resource):
+class User(Resource):
     _type: ClassVar = "users"
     _attributes: ClassVar = ["username", "email"]
     _plural_relationships: ClassVar = ["articles"]
