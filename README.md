@@ -45,24 +45,3 @@ def get_article(request: HttpRequest, article_id: int) -> ArticleResource:
 def list_articles(request: HttpRequest) -> list[ArticleResource]:
     return [ArticleResource(...) for article in Article.objects.all()]
 ```
-
-## TODO
-
-- [x] `create_one` — `POST /articles`
-- [x] ReDoc docs UI at `/docs`
-- [x] Filters and other GET variables (for get_many)
-- [x] `edit_one` — `PATCH /articles/:id`
-- [x] `delete_one` — `DELETE /articles/:id`
-- [x] `get_relationship` (singular) — `GET /articles/:id/relationships/author`
-- [x] `get_relationship` (plural) — `GET /articles/:id/relationships/tags`
-- [x] `edit_relationship` (singular) — `PATCH /articles/:id/relationships/author`
-- [x] `add_to_relationship` (plural) — `POST /articles/:id/relationships/tags`
-- [x] `remove_from_relationship` (plural) — `DELETE /articles/:id/relationships/tags`
-- [x] `reset_relationship` (plural) — `PATCH /articles/:id/relationships/tags`
-- [x] Compound documents (`include` param + `included` field in response)
-- [x] Sparse fieldsets (`fields[type]=...`)
-- [x] Sorting (`sort=...`)
-- [x] Error responses in the openapi spec
-- [x] Pagination (for get_many)
-- [x] Mapping `/articles?filter[author]=...` to related resource URL: Do nothing but include the helper pattern in the readme
-- [ ] Authentication

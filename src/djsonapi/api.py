@@ -17,7 +17,6 @@ from .exceptions import (
     DjsonApiException,
     DjsonApiExceptionSingle,
     InternalServerError,
-    _class_name_to_code,
     _class_name_to_title,
 )
 from .resource import Resource
@@ -104,6 +103,34 @@ def _extract_fields(query_params: dict) -> dict | None:
             type_name = k.split("__", 1)[1]
             fields[type_name] = v
     return fields if fields else None
+
+
+def _inject_sparse_fields(query_params: dict, request: HttpRequest, sparse: bool, sparse_type_names: set[str]) -> None:
+    if sparse:
+        for type_name in sparse_type_names:
+            key = f"fields__{type_name}"
+            if key not in query_params:
+                raw = request.GET.get(f"fields[{type_name}]")
+                if raw is not None:
+                    query_params[key] = raw
+    else:
+        for key in request.GET:
+            if key.startswith("fields[") and key.endswith("]"):
+                raise ValueError(f"Sparse fieldsets not supported for this endpoint. Got '{key}'")
+
+
+def _sparse_type_map(resource_class: type[Resource] | None, include_types: tuple[type[Resource], ...] | None) -> dict[str, type[Resource]]:
+    mapping: dict[str, type[Resource]] = {}
+    if resource_class:
+        mapping[resource_class._type] = resource_class
+    if include_types:
+        for t in include_types:
+            mapping[t._type] = t
+    return mapping
+
+
+def _sparse_type_names(resource_class: type[Resource] | None, include_types: tuple[type[Resource], ...] | None) -> set[str]:
+    return set(_sparse_type_map(resource_class, include_types).keys())
 
 
 def _extract_query_params(
@@ -210,6 +237,37 @@ def _handler_query_params(handler: Callable) -> list[dict]:
     return params
 
 
+def _handler_has_include(handler: Callable) -> bool:
+    sig = inspect.signature(inspect.unwrap(handler))
+    return any(name.startswith("include__") for name in sig.parameters)
+
+
+def _sparse_field_names(resource_class: type[Resource]) -> list[str]:
+    names: list[str] = []
+    if resource_class._attributes:
+        names.extend(resource_class._attributes)
+    if resource_class._singular_relationships:
+        names.extend(f for f, _ in resource_class._singular_relationships)
+    if resource_class._plural_relationships:
+        names.extend(f for f, _ in resource_class._plural_relationships)
+    return names
+
+
+def _add_sparse_params_to_op(sparse: bool, sparse_type_map: dict[str, type[Resource]], op: dict) -> None:
+    if not sparse:
+        return
+    for type_name in sorted(sparse_type_map):
+        field_names = _sparse_field_names(sparse_type_map[type_name])
+        desc = f"Comma-separated list of fields. Available fields: {', '.join(field_names)}." if field_names else f"Comma-separated list of fields."
+        op.setdefault("parameters", []).append({
+            "name": f"fields[{type_name}]",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string"},
+            "description": desc,
+        })
+
+
 def _add_query_params_to_op(handler: Callable, op: dict) -> None:
     query_params = _handler_query_params(inspect.unwrap(handler))
     if query_params:
@@ -290,7 +348,8 @@ class DjsonApi:
         self._registry = []
 
     def get_one(
-        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None,
+        sparse: bool = True, include_types: tuple[type[Resource], ...] | None = None,
     ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             url_name = f"get_one__{type_name}"
@@ -312,6 +371,8 @@ class DjsonApi:
                 )
                 else None
             )
+            sparse_type_map = _sparse_type_map(resource_class, include_types)
+            sparse_type_names = set(sparse_type_map.keys())
             is_async = asyncio.iscoroutinefunction(handler)
 
             if is_async:
@@ -321,6 +382,7 @@ class DjsonApi:
                         query_params = _extract_query_params(
                             handler, request, exclude=frozenset(kwargs.keys())
                         )
+                        _inject_sparse_fields(query_params, request, sparse, sparse_type_names)
                     except ValueError as exc:
                         return JsonResponse(
                             {
@@ -372,6 +434,7 @@ class DjsonApi:
                         query_params = _extract_query_params(
                             handler, request, exclude=frozenset(kwargs.keys())
                         )
+                        _inject_sparse_fields(query_params, request, sparse, sparse_type_names)
                     except ValueError as exc:
                         return JsonResponse(
                             {
@@ -426,6 +489,8 @@ class DjsonApi:
                     "pk_type": pk_type,
                     "resource_class": resource_class,
                     "errors": errors or [],
+                    "sparse": sparse,
+                    "sparse_type_map": sparse_type_map,
                 }
             )
             return wrapper
@@ -433,7 +498,8 @@ class DjsonApi:
         return decorator
 
     def get_many(
-        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None,
+        sparse: bool = True, include_types: tuple[type[Resource], ...] | None = None,
     ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             _validate_handler_params(handler)
@@ -447,6 +513,17 @@ class DjsonApi:
                 rc = args[0]
                 if isinstance(rc, type) and issubclass(rc, Resource):
                     resource_class = rc
+            elif origin is Response and args:
+                inner = args[0]
+                inner_origin = get_origin(inner)
+                if inner_origin is list:
+                    inner_args = get_args(inner)
+                    if inner_args:
+                        rc = inner_args[0]
+                        if isinstance(rc, type) and issubclass(rc, Resource):
+                            resource_class = rc
+            sparse_type_map = _sparse_type_map(resource_class, include_types)
+            sparse_type_names = set(sparse_type_map.keys())
             is_async = asyncio.iscoroutinefunction(handler)
 
             if is_async:
@@ -456,6 +533,7 @@ class DjsonApi:
                         query_params = _extract_query_params(
                             handler, request, exclude=frozenset(kwargs.keys())
                         )
+                        _inject_sparse_fields(query_params, request, sparse, sparse_type_names)
                     except ValueError as exc:
                         return JsonResponse(
                             {
@@ -506,6 +584,7 @@ class DjsonApi:
                         query_params = _extract_query_params(
                             handler, request, exclude=frozenset(kwargs.keys())
                         )
+                        _inject_sparse_fields(query_params, request, sparse, sparse_type_names)
                     except ValueError as exc:
                         return JsonResponse(
                             {
@@ -557,6 +636,8 @@ class DjsonApi:
                     "handler": wrapper,
                     "resource_class": resource_class,
                     "errors": errors or [],
+                    "sparse": sparse,
+                    "sparse_type_map": sparse_type_map,
                 }
             )
             return wrapper
@@ -564,7 +645,8 @@ class DjsonApi:
         return decorator
 
     def create_one(
-        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None,
+        sparse: bool = True, include_types: tuple[type[Resource], ...] | None = None,
     ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             _validate_handler_params(handler)
@@ -578,6 +660,8 @@ class DjsonApi:
                     if isinstance(anno, type) and issubclass(anno, Resource):
                         resource_class = anno
                         break
+            sparse_type_map = _sparse_type_map(resource_class, include_types)
+            sparse_type_names = set(sparse_type_map.keys())
             is_async = asyncio.iscoroutinefunction(handler)
 
             if is_async:
@@ -587,6 +671,7 @@ class DjsonApi:
                         query_params = _extract_query_params(
                             handler, request, exclude=frozenset(kwargs.keys())
                         )
+                        _inject_sparse_fields(query_params, request, sparse, sparse_type_names)
                     except ValueError as exc:
                         return JsonResponse(
                             {
@@ -650,6 +735,7 @@ class DjsonApi:
                         query_params = _extract_query_params(
                             handler, request, exclude=frozenset(kwargs.keys())
                         )
+                        _inject_sparse_fields(query_params, request, sparse, sparse_type_names)
                     except ValueError as exc:
                         return JsonResponse(
                             {
@@ -714,6 +800,8 @@ class DjsonApi:
                     "handler": wrapper,
                     "resource_class": resource_class,
                     "errors": errors or [],
+                    "sparse": sparse,
+                    "sparse_type_map": sparse_type_map,
                 }
             )
             return wrapper
@@ -721,7 +809,8 @@ class DjsonApi:
         return decorator
 
     def edit_one(
-        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None,
+        sparse: bool = True, include_types: tuple[type[Resource], ...] | None = None,
     ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             url_name = f"edit_one__{type_name}"
@@ -737,6 +826,8 @@ class DjsonApi:
                         resource_class = p.annotation
                         break
             _validate_handler_params(handler, exclude=frozenset([pk_name]))
+            sparse_type_map = _sparse_type_map(resource_class, include_types)
+            sparse_type_names = set(sparse_type_map.keys())
             is_async = asyncio.iscoroutinefunction(handler)
 
             if is_async:
@@ -746,6 +837,7 @@ class DjsonApi:
                         query_params = _extract_query_params(
                             handler, request, exclude=frozenset(kwargs.keys())
                         )
+                        _inject_sparse_fields(query_params, request, sparse, sparse_type_names)
                     except ValueError as exc:
                         return JsonResponse(
                             {
@@ -817,6 +909,7 @@ class DjsonApi:
                         query_params = _extract_query_params(
                             handler, request, exclude=frozenset(kwargs.keys())
                         )
+                        _inject_sparse_fields(query_params, request, sparse, sparse_type_names)
                     except ValueError as exc:
                         return JsonResponse(
                             {
@@ -891,6 +984,8 @@ class DjsonApi:
                     "pk_type": pk_type,
                     "resource_class": resource_class,
                     "errors": errors or [],
+                    "sparse": sparse,
+                    "sparse_type_map": sparse_type_map,
                 }
             )
             return wrapper
@@ -1171,7 +1266,8 @@ class DjsonApi:
         return decorator
 
     def get_relationship(
-        self, type_name: str, rel_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
+        self, type_name: str, rel_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None,
+        sparse: bool = True, include_types: tuple[type[Resource], ...] | None = None,
     ) -> Callable[..., Any]:
         def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
             url_name = f"get_relationship__{type_name}__{rel_name}"
@@ -1192,12 +1288,26 @@ class DjsonApi:
                     rc = args[0]
                     if isinstance(rc, type) and issubclass(rc, Resource):
                         resource_class = rc
+            elif origin is Response:
+                args = get_args(return_type)
+                if args:
+                    inner = args[0]
+                    inner_origin = get_origin(inner)
+                    if inner_origin is list:
+                        is_plural = True
+                        inner_args = get_args(inner)
+                        if inner_args:
+                            rc = inner_args[0]
+                            if isinstance(rc, type) and issubclass(rc, Resource):
+                                resource_class = rc
             elif (
                 return_type is not inspect.Parameter.empty
                 and isinstance(return_type, type)
                 and issubclass(return_type, Resource)
             ):
                 resource_class = return_type
+            sparse_type_map = _sparse_type_map(resource_class, include_types)
+            sparse_type_names = set(sparse_type_map.keys())
             is_async = asyncio.iscoroutinefunction(handler)
 
             if is_async:
@@ -1207,6 +1317,7 @@ class DjsonApi:
                         query_params = _extract_query_params(
                             handler, request, exclude=frozenset(kwargs.keys())
                         )
+                        _inject_sparse_fields(query_params, request, sparse, sparse_type_names)
                     except ValueError as exc:
                         return JsonResponse(
                             {
@@ -1272,6 +1383,7 @@ class DjsonApi:
                         query_params = _extract_query_params(
                             handler, request, exclude=frozenset(kwargs.keys())
                         )
+                        _inject_sparse_fields(query_params, request, sparse, sparse_type_names)
                     except ValueError as exc:
                         return JsonResponse(
                             {
@@ -1342,6 +1454,8 @@ class DjsonApi:
                     "resource_class": resource_class,
                     "is_plural": is_plural,
                     "errors": errors or [],
+                    "sparse": sparse,
+                    "sparse_type_map": sparse_type_map,
                 }
             )
             return wrapper
@@ -1515,6 +1629,7 @@ class DjsonApi:
                         type_name, resource_class, type_to_endpoint, spec,
                         rel_to_endpoint=self._rel_to_endpoint(),
                         rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
+                        has_include=_handler_has_include(entry["handler"]),
                     )
                 path_item["get"] = {
                     "tags": [type_name],
@@ -1539,6 +1654,7 @@ class DjsonApi:
                     },
                 }
                 _add_query_params_to_op(entry["handler"], path_item["get"])
+                _add_sparse_params_to_op(entry.get("sparse", True), entry.get("sparse_type_map", {}), path_item["get"])
 
             elif entry["method"] == "get_many":
                 path_str = f"/{type_name}/"
@@ -1547,6 +1663,7 @@ class DjsonApi:
                     type_name, resource_class, type_to_endpoint, spec,
                     rel_to_endpoint=self._rel_to_endpoint(),
                     rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
+                    has_include=_handler_has_include(entry["handler"]),
                 )
                 path_item["get"] = {
                     "tags": [type_name],
@@ -1563,6 +1680,7 @@ class DjsonApi:
                     },
                 }
                 _add_query_params_to_op(entry["handler"], path_item["get"])
+                _add_sparse_params_to_op(entry.get("sparse", True), entry.get("sparse_type_map", {}), path_item["get"])
 
             elif entry["method"] == "create_one":
                 path_str = f"/{type_name}/"
@@ -1573,6 +1691,7 @@ class DjsonApi:
                         type_name, resource_class, type_to_endpoint, spec,
                         rel_to_endpoint=self._rel_to_endpoint(),
                         rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
+                        has_include=_handler_has_include(entry["handler"]),
                     )
                 path_item["post"] = {
                     "tags": [type_name],
@@ -1599,6 +1718,7 @@ class DjsonApi:
                     },
                 }
                 _add_query_params_to_op(entry["handler"], path_item["post"])
+                _add_sparse_params_to_op(entry.get("sparse", True), entry.get("sparse_type_map", {}), path_item["post"])
 
             elif entry["method"] == "edit_one":
                 pk_name = entry["pk_name"]
@@ -1615,6 +1735,7 @@ class DjsonApi:
                         type_name, resource_class, type_to_endpoint, spec,
                         rel_to_endpoint=self._rel_to_endpoint(),
                         rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
+                        has_include=_handler_has_include(entry["handler"]),
                     )
                 path_item["patch"] = {
                     "tags": [type_name],
@@ -1649,6 +1770,7 @@ class DjsonApi:
                     },
                 }
                 _add_query_params_to_op(entry["handler"], path_item["patch"])
+                _add_sparse_params_to_op(entry.get("sparse", True), entry.get("sparse_type_map", {}), path_item["patch"])
 
             elif entry["method"] == "delete_one":
                 pk_name = entry["pk_name"]
@@ -1691,22 +1813,39 @@ class DjsonApi:
                         _ensure_schema(rel_type_name, resource_class, type_to_endpoint, spec,
                             rel_to_endpoint=self._rel_to_endpoint(),
                             rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),)
-                        response_schema = {
+                        has_include = _handler_has_include(entry["handler"])
+                        links_schema: dict = {
                             "type": "object",
                             "properties": {
-                                "data": {
-                                    "type": "array",
-                                    "items": {"$ref": f"#/components/schemas/{rel_type_name}_resource"},
-                                },
-                                "jsonapi": {
-                                    "type": "object",
-                                    "properties": {"version": {"const": "1.0"}},
-                                },
+                                "self": {"type": "string"},
                             },
+                            "additionalProperties": {"type": "string"},
+                        }
+                        properties: dict = {
+                            "data": {
+                                "type": "array",
+                                "items": {"$ref": f"#/components/schemas/{rel_type_name}_resource"},
+                            },
+                            "jsonapi": {
+                                "type": "object",
+                                "properties": {"version": {"const": "1.0"}},
+                            },
+                            "links": links_schema,
+                        }
+                        if has_include:
+                            properties["included"] = {
+                                "type": "array",
+                                "items": {"type": "object"},
+                            }
+                        response_schema = {
+                            "type": "object",
+                            "properties": properties,
+                            "required": ["data", "jsonapi"],
                         }
                     else:
                         response_schema = _response_schema(
-                            rel_type_name, resource_class, type_to_endpoint, spec, rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint()
+                            rel_type_name, resource_class, type_to_endpoint, spec, rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
+                            has_include=_handler_has_include(entry["handler"]),
                         )
                 path_item["get"] = {
                     "tags": [type_name],
@@ -1731,6 +1870,7 @@ class DjsonApi:
                     },
                 }
                 _add_query_params_to_op(entry["handler"], path_item["get"])
+                _add_sparse_params_to_op(entry.get("sparse", True), entry.get("sparse_type_map", {}), path_item["get"])
             elif entry["method"] in (
                 "edit_relationship", "reset_relationship", "add_to_relationship", "remove_from_relationship"
             ):
@@ -1780,6 +1920,7 @@ class DjsonApi:
                         "204": {"description": "No Content"},
                     },
                 }
+
             if entry.get("errors"):
                 method = entry["method"]
                 _ENTRY_METHOD_TO_HTTP = {
@@ -1805,17 +1946,25 @@ class DjsonApi:
                     op = spec["paths"][path_str].get(http_method)
                     if op:
                         for ex_class in entry["errors"]:
-                            schema_name = _build_error_schema(ex_class, spec)
                             status_code = str(ex_class.STATUS)
                             ex_title = ex_class.TITLE if ex_class.TITLE is not None else _class_name_to_title(ex_class.__name__)
                             op["responses"][status_code] = {
                                 "description": ex_title,
                                 "content": {
                                     "application/vnd.api+json": {
-                                        "schema": {"$ref": f"#/components/schemas/{schema_name}"}
-                                    }
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "errors": {
+                                                    "type": "array",
+                                                    "items": {"type": "object"},
+                                                },
+                                            },
+                                        },
+                                    },
                                 },
                             }
+
         schema_names = list(spec["components"]["schemas"].keys())
         if schema_names:
             endpoint_tags = sorted(set(entry["type_name"] for entry in self._registry))
@@ -1889,6 +2038,17 @@ def _add_relationship_links(resource, type_to_endpoint, rel_to_endpoint=None, re
                         rel_data.setdefault("links", {})["related"] = related_url
                     except (NoReverseMatch, ImproperlyConfigured):
                         pass
+        elif rel_to_endpoint:
+            rel_endpoint = rel_to_endpoint.get((parent_type, rel_field))
+            if rel_endpoint:
+                try:
+                    related_url = reverse(
+                        rel_endpoint["url_name"],
+                        kwargs={rel_endpoint["pk_name"]: resource["id"]},
+                    )
+                    rel_data.setdefault("links", {})["related"] = related_url
+                except (NoReverseMatch, ImproperlyConfigured):
+                    pass
 
 
 def _apply_fields(resource, fields_for_type):
@@ -1898,10 +2058,14 @@ def _apply_fields(resource, fields_for_type):
         resource["attributes"] = {
             k: v for k, v in resource["attributes"].items() if k in fields_for_type
         }
+        if not resource["attributes"]:
+            del resource["attributes"]
     if "relationships" in resource:
         resource["relationships"] = {
             k: v for k, v in resource["relationships"].items() if k in fields_for_type
         }
+        if not resource["relationships"]:
+            del resource["relationships"]
 
 
 def _serialize_resource(result, type_to_endpoint, fields, rel_to_endpoint=None, rel_mgmt_to_endpoint=None):
@@ -1987,54 +2151,33 @@ def _ensure_schema(type_name, resource_class, type_to_endpoint, spec, rel_to_end
         spec["components"]["schemas"][schema_name] = schema_obj
 
 
-def _response_schema(type_name, resource_class, type_to_endpoint, spec, rel_to_endpoint=None, rel_mgmt_to_endpoint=None):
+def _response_schema(type_name, resource_class, type_to_endpoint, spec, rel_to_endpoint=None, rel_mgmt_to_endpoint=None, has_include=False):
     _ensure_schema(type_name, resource_class, type_to_endpoint, spec, rel_to_endpoint=rel_to_endpoint, rel_mgmt_to_endpoint=rel_mgmt_to_endpoint)
-    return {
+    links_schema: dict = {
         "type": "object",
         "properties": {
-            "data": {"$ref": f"#/components/schemas/{type_name}_resource"},
-            "jsonapi": {
-                "type": "object",
-                "properties": {"version": {"const": "1.0"}},
-            },
+            "self": {"type": "string"},
         },
+        "additionalProperties": {"type": "string"},
     }
-
-
-_ERROR_STATUS_MAP: dict[int, list[type[DjsonApiExceptionSingle]]] = {}
-for _cls in DjsonApiExceptionSingle.__subclasses__():
-    _ERROR_STATUS_MAP.setdefault(int(_cls.STATUS), []).append(_cls)
-
-
-def _build_error_schema(ex_class: type[DjsonApiExceptionSingle], spec: dict) -> str:
-    schema_name = f"{ex_class.__name__}_error"
-    if schema_name not in spec["components"]["schemas"]:
-        code = ex_class.CODE if ex_class.CODE is not None else _class_name_to_code(ex_class.__name__)
-        title = ex_class.TITLE if ex_class.TITLE is not None else _class_name_to_title(ex_class.__name__)
-        error_props: dict = {
-            "status": {"type": "string", "const": str(ex_class.STATUS)},
-            "code": {"type": "string", "const": code},
-            "title": {"type": "string", "const": title},
-            "detail": {"type": "string"},
-        }
-        if ex_class.STATUS == 400:
-            error_props["source"] = {
-                "type": "object",
-                "properties": {"pointer": {"type": "string"}},
-            }
-        spec["components"]["schemas"][schema_name] = {
+    properties: dict = {
+        "data": {"$ref": f"#/components/schemas/{type_name}_resource"},
+        "jsonapi": {
             "type": "object",
-            "properties": {
-                "errors": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": error_props,
-                    },
-                }
-            },
+            "properties": {"version": {"const": "1.0"}},
+        },
+        "links": links_schema,
+    }
+    if has_include:
+        properties["included"] = {
+            "type": "array",
+            "items": {"type": "object"},
         }
-    return schema_name
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["data", "jsonapi"],
+    }
 
 
 class _CombinedView:

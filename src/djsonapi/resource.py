@@ -434,14 +434,16 @@ class Resource:
         for field, type_name in self._singular_relationships:
             value = getattr(self, field, MISSING)
             if value is not MISSING:
-                result.setdefault("relationships", {})[field] = {
-                    "data": {"type": type_name, "id": str(value)}
-                }
+                rel = {}
+                if value is not None:
+                    rel["data"] = {"type": type_name, "id": str(value)}
+                result.setdefault("relationships", {})[field] = rel
         for field, type_name in self._plural_relationships:
             value = getattr(self, field, MISSING)
             if value is not MISSING:
-                assert isinstance(value, Sequence)
-                result.setdefault("relationships", {})[field] = {
-                    "data": [{"type": type_name, "id": str(item)} for item in value]
-                }
+                rel = {}
+                if value is not None:
+                    assert isinstance(value, Sequence)
+                    rel["data"] = [{"type": type_name, "id": str(item)} for item in value]
+                result.setdefault("relationships", {})[field] = rel
         return result

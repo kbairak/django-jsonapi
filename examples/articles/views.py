@@ -2,12 +2,12 @@
 from django.http import HttpRequest
 
 from djsonapi import DjsonApi, Response
-from djsonapi.exceptions import Conflict, NotFound
+from djsonapi.exceptions import BadRequest, Conflict, NotFound
 
 from .models import Article, Category, User
 from .resources import ArticleResource, CategoryResource, UserResource
 
-api = DjsonApi()
+# Utils
 
 
 def _article_to_resource(article: Article) -> ArticleResource:
@@ -17,7 +17,7 @@ def _article_to_resource(article: Article) -> ArticleResource:
         content=article.content,
         created_at=article.created_at,
         author=article.author_id,
-        categories=list(article.categories.values_list("id", flat=True)),
+        categories=[c.id for c in article.categories.all()],
     )
 
 
@@ -28,14 +28,19 @@ def _category_to_resource(category: Category) -> CategoryResource:
         slug=category.slug,
         description=category.description,
         created_at=category.created_at,
-        articles=list(category.articles.values_list("id", flat=True)),
     )
+
+
+# API
+
+
+api = DjsonApi()
 
 
 # ── Category ──────────────────────────────────────────────────────────
 
 
-@api.get_one("categories", errors=[NotFound])
+@api.get_one("categories", errors=[BadRequest, NotFound])
 def get_category(request: HttpRequest, category_id: int) -> CategoryResource:
     try:
         category = Category.objects.get(id=category_id)
@@ -44,7 +49,7 @@ def get_category(request: HttpRequest, category_id: int) -> CategoryResource:
     return _category_to_resource(category)
 
 
-@api.get_many("categories")
+@api.get_many("categories", errors=[BadRequest])
 def list_categories(
     request: HttpRequest,
     filter__name__icontains: str = "",
@@ -91,7 +96,7 @@ def list_categories(
     )
 
 
-@api.create_one("categories")
+@api.create_one("categories", errors=[BadRequest])
 def create_category(request: HttpRequest, payload: CategoryResource) -> CategoryResource:
     category = Category.objects.create(
         name=payload.name,
@@ -101,7 +106,7 @@ def create_category(request: HttpRequest, payload: CategoryResource) -> Category
     return _category_to_resource(category)
 
 
-@api.edit_one("categories", errors=[NotFound, Conflict])
+@api.edit_one("categories", errors=[BadRequest, NotFound, Conflict])
 def edit_category(
     request: HttpRequest, category_id: int, payload: CategoryResource
 ) -> CategoryResource:
@@ -125,18 +130,28 @@ def delete_category(request: HttpRequest, category_id: int) -> None:
     category.delete()
 
 
-@api.get_relationship("categories", "articles")
+@api.get_relationship("categories", "articles", errors=[BadRequest])
 def get_category_articles(
-    request: HttpRequest, category_id: int
-) -> list[ArticleResource]:
+    request: HttpRequest, category_id: int, page: int = 1
+) -> Response[list[ArticleResource]]:
     try:
         category = Category.objects.prefetch_related("articles").get(id=category_id)
     except Category.DoesNotExist:
         raise NotFound(f"Category with id '{category_id}' not found")
-    return [_article_to_resource(article) for article in category.articles.all()]
+    qs = category.articles.all()
+    page_size = 10
+    offset = (page - 1) * page_size
+    qs = qs[offset : offset + page_size]
+    links: dict[str, dict[str, str | int]] = {"next": {"page": page + 1}}
+    if page > 1:
+        links["prev"] = {"page": page - 1}
+    return Response(
+        data=[_article_to_resource(article) for article in qs],
+        links=links,
+    )
 
 
-@api.reset_relationship("categories", "articles")
+@api.reset_relationship("categories", "articles", errors=[BadRequest])
 def reset_category_articles(
     request: HttpRequest, category_id: int, article_ids: list[int]
 ) -> None:
@@ -147,10 +162,8 @@ def reset_category_articles(
     category.articles.set(article_ids)
 
 
-@api.add_to_relationship("categories", "articles")
-def add_category_articles(
-    request: HttpRequest, category_id: int, article_ids: list[int]
-) -> None:
+@api.add_to_relationship("categories", "articles", errors=[BadRequest])
+def add_category_articles(request: HttpRequest, category_id: int, article_ids: list[int]) -> None:
     try:
         category = Category.objects.get(id=category_id)
     except Category.DoesNotExist:
@@ -158,7 +171,7 @@ def add_category_articles(
     category.articles.add(*article_ids)
 
 
-@api.remove_from_relationship("categories", "articles")
+@api.remove_from_relationship("categories", "articles", errors=[BadRequest])
 def remove_category_articles(
     request: HttpRequest, category_id: int, article_ids: list[int]
 ) -> None:
@@ -172,16 +185,43 @@ def remove_category_articles(
 # ── Article ───────────────────────────────────────────────────────────
 
 
-@api.get_one("articles", errors=[NotFound])
-def get_article(request: HttpRequest, article_id: int) -> ArticleResource:
+@api.get_one(
+    "articles", errors=[BadRequest, NotFound], include_types=(UserResource, CategoryResource)
+)
+def get_article(
+    request: HttpRequest,
+    article_id: int,
+    include__author: bool = False,
+    include__categories: bool = False,
+) -> Response[ArticleResource]:
     try:
-        article = Article.objects.get(id=article_id)
+        qs = Article.objects.all()
+        if include__author:
+            qs = qs.select_related("author")
+        if include__categories:
+            qs = qs.prefetch_related("categories")
+        article = qs.get(id=article_id)
     except Article.DoesNotExist:
         raise NotFound(f"Article with id '{article_id}' not found")
-    return _article_to_resource(article)
+    included = list[ArticleResource | UserResource | CategoryResource]()
+    if include__author:
+        included.append(
+            UserResource(
+                id=article.author.pk,
+                username=article.author.username,
+                email=article.author.email,
+            )
+        )
+    if include__categories:
+        for category in article.categories.all():
+            included.append(_category_to_resource(category))
+    return Response(
+        data=_article_to_resource(article),
+        included=included or None,
+    )
 
 
-@api.get_many("articles")
+@api.get_many("articles", errors=[BadRequest], include_types=(UserResource, CategoryResource))
 def list_articles(
     request: HttpRequest,
     filter__title__contains: str = "",
@@ -246,7 +286,7 @@ def list_articles(
     )
 
 
-@api.create_one("articles")
+@api.create_one("articles", errors=[BadRequest])
 def create_article(request: HttpRequest, payload: ArticleResource) -> ArticleResource:
     article = Article.objects.create(
         title=payload.title, content=payload.content, author_id=payload.author
@@ -256,7 +296,7 @@ def create_article(request: HttpRequest, payload: ArticleResource) -> ArticleRes
     return _article_to_resource(article)
 
 
-@api.edit_one("articles", errors=[NotFound, Conflict])
+@api.edit_one("articles", errors=[BadRequest, NotFound, Conflict])
 def edit_article(
     request: HttpRequest, article_id: int, payload: ArticleResource
 ) -> ArticleResource:
@@ -273,7 +313,7 @@ def edit_article(
     return _article_to_resource(article)
 
 
-@api.delete_one("articles")
+@api.delete_one("articles", errors=[NotFound])
 def delete_article(request: HttpRequest, article_id: int) -> None:
     try:
         article = Article.objects.get(id=article_id)
@@ -285,7 +325,7 @@ def delete_article(request: HttpRequest, article_id: int) -> None:
 # ── Article Relationships ────────────────────────────────────────────
 
 
-@api.get_relationship("articles", "author")
+@api.get_relationship("articles", "author", errors=[BadRequest])
 def get_article_author(request: HttpRequest, article_id: int) -> UserResource:
     try:
         article = Article.objects.select_related("author").get(id=article_id)
@@ -298,7 +338,7 @@ def get_article_author(request: HttpRequest, article_id: int) -> UserResource:
     )
 
 
-@api.edit_relationship("articles", "author")
+@api.edit_relationship("articles", "author", errors=[BadRequest])
 def edit_article_author(request: HttpRequest, article_id: int, author_id: int) -> None:
     try:
         article = Article.objects.get(id=article_id)
@@ -308,18 +348,28 @@ def edit_article_author(request: HttpRequest, article_id: int, author_id: int) -
     article.save()
 
 
-@api.get_relationship("articles", "categories")
+@api.get_relationship("articles", "categories", errors=[BadRequest])
 def get_article_categories(
-    request: HttpRequest, article_id: int
-) -> list[CategoryResource]:
+    request: HttpRequest, article_id: int, page: int = 1
+) -> Response[list[CategoryResource]]:
     try:
         article = Article.objects.prefetch_related("categories").get(id=article_id)
     except Article.DoesNotExist:
         raise NotFound(f"Article with id '{article_id}' not found")
-    return [_category_to_resource(c) for c in article.categories.all()]
+    qs = article.categories.all()
+    page_size = 10
+    offset = (page - 1) * page_size
+    qs = qs[offset : offset + page_size]
+    links: dict[str, dict[str, str | int]] = {"next": {"page": page + 1}}
+    if page > 1:
+        links["prev"] = {"page": page - 1}
+    return Response(
+        data=[_category_to_resource(c) for c in qs],
+        links=links,
+    )
 
 
-@api.reset_relationship("articles", "categories")
+@api.reset_relationship("articles", "categories", errors=[BadRequest])
 def reset_article_categories(
     request: HttpRequest, article_id: int, category_ids: list[int]
 ) -> None:
@@ -330,8 +380,8 @@ def reset_article_categories(
     article.categories.set(category_ids)
 
 
-@api.add_to_relationship("articles", "categories")
-def add_article_categories(
+@api.add_to_relationship("articles", "categories", errors=[BadRequest])
+def add_to_article_categories(
     request: HttpRequest, article_id: int, category_ids: list[int]
 ) -> None:
     try:
@@ -341,8 +391,8 @@ def add_article_categories(
     article.categories.add(*category_ids)
 
 
-@api.remove_from_relationship("articles", "categories")
-def remove_article_categories(
+@api.remove_from_relationship("articles", "categories", errors=[BadRequest])
+def remove_from_article_categories(
     request: HttpRequest, article_id: int, category_ids: list[int]
 ) -> None:
     try:
@@ -355,7 +405,7 @@ def remove_article_categories(
 # ── User ──────────────────────────────────────────────────────────────
 
 
-@api.get_one("users")
+@api.get_one("users", errors=[BadRequest])
 def get_user(request: HttpRequest, user_id: int) -> UserResource:
     try:
         user = User.objects.get(id=user_id)
@@ -364,7 +414,35 @@ def get_user(request: HttpRequest, user_id: int) -> UserResource:
     return UserResource(id=user.pk, username=user.username, email=user.email)
 
 
-@api.get_many("users")
-def list_users(request: HttpRequest) -> list[UserResource]:
-    users = User.objects.all()
-    return [UserResource(id=user.pk, username=user.username, email=user.email) for user in users]
+@api.get_many("users", errors=[BadRequest])
+def list_users(request: HttpRequest, page: int = 1) -> Response[list[UserResource]]:
+    qs = User.objects.all()
+    page_size = 10
+    offset = (page - 1) * page_size
+    qs = qs[offset : offset + page_size]
+    links: dict[str, dict[str, str | int]] = {"next": {"page": page + 1}}
+    if page > 1:
+        links["prev"] = {"page": page - 1}
+    users = [UserResource(id=user.pk, username=user.username, email=user.email) for user in qs]
+    return Response(data=users, links=links)
+
+
+@api.get_relationship("users", "articles", errors=[BadRequest])
+def get_user_articles(
+    request: HttpRequest, user_id: int, page: int = 1
+) -> Response[list[ArticleResource]]:
+    try:
+        user = User.objects.prefetch_related("articles").get(id=user_id)
+    except User.DoesNotExist:
+        raise NotFound(f"User with id '{user_id}' not found")
+    qs = user.articles.all()
+    page_size = 10
+    offset = (page - 1) * page_size
+    qs = qs[offset : offset + page_size]
+    links: dict[str, dict[str, str | int]] = {"next": {"page": page + 1}}
+    if page > 1:
+        links["prev"] = {"page": page - 1}
+    return Response(
+        data=[_article_to_resource(article) for article in qs],
+        links=links,
+    )
