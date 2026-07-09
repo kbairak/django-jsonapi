@@ -1,8 +1,6 @@
-from typing import Sequence
-
 from django.http import HttpRequest
 
-from djsonapi.api2 import DjsonApi
+from djsonapi.api import DjsonApi
 from djsonapi.exceptions import BadRequest, Conflict, NotFound
 from djsonapi.response import Response
 
@@ -226,7 +224,8 @@ def edit_article_author(request: HttpRequest, article_id: int, author_id: int) -
 
 @api.get_relationship("articles", "categories", errors=[BadRequest])
 def get_article_categories(
-    request: HttpRequest, article_id: int,
+    request: HttpRequest,
+    article_id: int,
     page: int = 1,
 ) -> Response[list[CategoryResource]]:
     try:
@@ -312,7 +311,7 @@ def get_user_articles(
         user = UserModel.objects.prefetch_related("articles").get(id=user_id)
     except UserModel.DoesNotExist:
         raise NotFound(f"UserModel with id '{user_id}' not found")
-    qs = user.articles.all()
+    qs = ArticleModel.objects.filter(author_id=user_id)
     page_size = 10
     offset = (page - 1) * page_size
     qs = qs[offset : offset + page_size]

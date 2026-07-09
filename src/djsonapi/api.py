@@ -1,35 +1,34 @@
 import asyncio
 import functools
 import inspect
-import json as json_module
-import types
-import uuid as uuid_type
-from collections.abc import Callable
-from typing import Any, Union, get_args, get_origin
-from urllib.parse import urlencode
+import json
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Any, Callable, ClassVar, Sequence, get_args, get_origin
+from uuid import UUID
 
-import jsonschema
+import jsonschema  # type: ignore
 from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest, HttpResponse, JsonResponse
-from django.urls import NoReverseMatch, path, reverse
+from django.urls import NoReverseMatch, URLPattern, reverse
+from django.urls import path as django_path
+from django.views.decorators.csrf import csrf_exempt
 
-from .exceptions import (
-    DjsonApiException,
+from djsonapi.exceptions import (
+    BadRequest,
+    DjsonApiExceptionMulti,
     DjsonApiExceptionSingle,
     InternalServerError,
+    MethodNotAllowed,
+    NotFound,
     _class_name_to_title,
 )
-from .resource import Resource
-from .response import Response
-
-_PYTHON_TO_DJANGO_PATH = {
-    uuid_type.UUID: "uuid",
-    int: "int",
-    str: "str",
-}
+from djsonapi.resource import Resource
+from djsonapi.response import Response
 
 _PYTHON_TO_OPENAPI = {
-    uuid_type.UUID: {"type": "string", "format": "uuid"},
+    UUID: {"type": "string", "format": "uuid"},
     int: {"type": "integer"},
     str: {"type": "string"},
     float: {"type": "number"},
@@ -37,1417 +36,25 @@ _PYTHON_TO_OPENAPI = {
 }
 
 
-_MUTABLE_DEFAULT = object()
-
-_VALID_PREFIXES = ["filter__", "page", "sort", "include__", "fields__", "extra__"]
-
-
-class DjsonApi:
-    def __init__(self):
-        self._registry = []
-
-    def get_one(
-        self,
-        type_name: str,
-        errors: list[type[DjsonApiExceptionSingle]] | None = None,
-        sparse: bool = True,
-        include_types: tuple[type[Resource], ...] | None = None,
-    ) -> Callable[..., Any]:
-        def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
-            url_name = f"get_one__{type_name}"
-            sig = inspect.signature(handler)
-            params = list(sig.parameters.values())
-            pk_param = [p for p in params if p.name != "request"][0]
-            pk_name = pk_param.name
-            _validate_handler_params(handler, exclude=frozenset([pk_name]))
-            pk_type = (
-                pk_param.annotation if pk_param.annotation != inspect.Parameter.empty else str
-            )
-            return_type = sig.return_annotation
-            resource_class = None
-            if return_type is not inspect.Parameter.empty:
-                origin = get_origin(return_type)
-                if origin is Response:
-                    args = get_args(return_type)
-                    if args:
-                        rc = args[0]
-                        if isinstance(rc, type) and issubclass(rc, Resource):
-                            resource_class = rc
-                elif isinstance(return_type, type) and issubclass(return_type, Resource):
-                    resource_class = return_type
-            sparse_type_map = _sparse_type_map(resource_class, include_types)
-            sparse_type_names = set(sparse_type_map.keys())
-            is_async = asyncio.iscoroutinefunction(handler)
-
-            def _build_response(result, request, query_params, kwargs):
-                raw, included, resp_links = _unwrap_response(result)
-                extra_links = _build_links(request, resp_links)
-                return _one_response(
-                    raw,
-                    url_name,
-                    kwargs,
-                    self._type_to_endpoint(),
-                    rel_to_endpoint=self._rel_to_endpoint(),
-                    rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
-                    fields=_extract_fields(query_params),
-                    included=included,
-                    extra_links=extra_links,
-                )
-
-            if is_async:
-
-                @_catch_jsonapi_errors
-                async def _async_wrapper(request, **kwargs):
-                    qp, err = _extract_or_400(
-                        handler,
-                        request,
-                        exclude=frozenset(kwargs.keys()),
-                        sparse=sparse,
-                        sparse_type_names=sparse_type_names,
-                    )
-                    if err:
-                        return err
-                    assert isinstance(qp, dict)
-                    result = await handler(request, **qp, **kwargs)
-                    return _build_response(result, request, qp, kwargs)
-
-                wrapper_fn = _async_wrapper
-            else:
-
-                @_catch_jsonapi_errors
-                def _sync_wrapper(request, **kwargs):
-                    qp, err = _extract_or_400(
-                        handler,
-                        request,
-                        exclude=frozenset(kwargs.keys()),
-                        sparse=sparse,
-                        sparse_type_names=sparse_type_names,
-                    )
-                    if err:
-                        return err
-                    assert isinstance(qp, dict)
-                    result = handler(request, **qp, **kwargs)
-                    return _build_response(result, request, qp, kwargs)
-
-                wrapper_fn = _sync_wrapper
-
-            wrapper = functools.update_wrapper(
-                wrapper_fn,
-                handler,
-                assigned=("__module__", "__name__", "__qualname__", "__doc__"),
-                updated=(),
-            )
-
-            self._registry.append(
-                {
-                    "type_name": type_name,
-                    "method": "get_one",
-                    "handler": wrapper,
-                    "pk_name": pk_name,
-                    "pk_type": pk_type,
-                    "resource_class": resource_class,
-                    "errors": errors or [],
-                    "sparse": sparse,
-                    "sparse_type_map": sparse_type_map,
-                }
-            )
-            return wrapper
-
-        return decorator
-
-    def get_many(
-        self,
-        type_name: str,
-        errors: list[type[DjsonApiExceptionSingle]] | None = None,
-        sparse: bool = True,
-        include_types: tuple[type[Resource], ...] | None = None,
-    ) -> Callable[..., Any]:
-        def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
-            _validate_handler_params(handler)
-            url_name = f"get_many__{type_name}"
-            sig = inspect.signature(handler)
-            return_type = sig.return_annotation
-            origin = get_origin(return_type)
-            args = get_args(return_type)
-            resource_class = None
-            if origin is list and args:
-                rc = args[0]
-                if isinstance(rc, type) and issubclass(rc, Resource):
-                    resource_class = rc
-            elif origin is Response and args:
-                inner = args[0]
-                inner_origin = get_origin(inner)
-                if inner_origin is list:
-                    inner_args = get_args(inner)
-                    if inner_args:
-                        rc = inner_args[0]
-                        if isinstance(rc, type) and issubclass(rc, Resource):
-                            resource_class = rc
-            sparse_type_map = _sparse_type_map(resource_class, include_types)
-            sparse_type_names = set(sparse_type_map.keys())
-            is_async = asyncio.iscoroutinefunction(handler)
-
-            def _build_response(result, request, query_params):
-                raw, included, resp_links = _unwrap_response(result)
-                extra_links = _build_links(request, resp_links)
-                return _many_response(
-                    raw,
-                    url_name,
-                    self._type_to_endpoint(),
-                    rel_to_endpoint=self._rel_to_endpoint(),
-                    rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
-                    fields=_extract_fields(query_params),
-                    included=included,
-                    extra_links=extra_links,
-                )
-
-            if is_async:
-
-                @_catch_jsonapi_errors
-                async def _async_wrapper(request, **kwargs):
-                    qp, err = _extract_or_400(
-                        handler,
-                        request,
-                        exclude=frozenset(kwargs.keys()),
-                        sparse=sparse,
-                        sparse_type_names=sparse_type_names,
-                    )
-                    if err:
-                        return err
-                    assert isinstance(qp, dict)
-                    result = await handler(request, **qp)
-                    return _build_response(result, request, qp)
-
-                wrapper_fn = _async_wrapper
-            else:
-
-                @_catch_jsonapi_errors
-                def _sync_wrapper(request, **kwargs):
-                    qp, err = _extract_or_400(
-                        handler,
-                        request,
-                        exclude=frozenset(kwargs.keys()),
-                        sparse=sparse,
-                        sparse_type_names=sparse_type_names,
-                    )
-                    if err:
-                        return err
-                    assert isinstance(qp, dict)
-                    result = handler(request, **qp)
-                    return _build_response(result, request, qp)
-
-                wrapper_fn = _sync_wrapper
-
-            wrapper = functools.update_wrapper(
-                wrapper_fn,
-                handler,
-                assigned=("__module__", "__name__", "__qualname__", "__doc__"),
-                updated=(),
-            )
-
-            self._registry.append(
-                {
-                    "type_name": type_name,
-                    "method": "get_many",
-                    "handler": wrapper,
-                    "resource_class": resource_class,
-                    "errors": errors or [],
-                    "sparse": sparse,
-                    "sparse_type_map": sparse_type_map,
-                }
-            )
-            return wrapper
-
-        return decorator
-
-    def create_one(
-        self,
-        type_name: str,
-        errors: list[type[DjsonApiExceptionSingle]] | None = None,
-        sparse: bool = True,
-        include_types: tuple[type[Resource], ...] | None = None,
-    ) -> Callable[..., Any]:
-        def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
-            _validate_handler_params(handler)
-            url_name = f"create_one__{type_name}"
-            sig = inspect.signature(handler)
-            params = list(sig.parameters.values())
-            resource_class = None
-            for p in params:
-                if p.name != "request":
-                    anno = p.annotation
-                    if isinstance(anno, type) and issubclass(anno, Resource):
-                        resource_class = anno
-                        break
-            sparse_type_map = _sparse_type_map(resource_class, include_types)
-            sparse_type_names = set(sparse_type_map.keys())
-            is_async = asyncio.iscoroutinefunction(handler)
-
-            def _build_response(result, request, query_params):
-                raw, included, resp_links = _unwrap_response(result)
-                extra_links = _build_links(request, resp_links)
-                return _create_response(
-                    raw,
-                    type_name,
-                    self._type_to_endpoint(),
-                    rel_to_endpoint=self._rel_to_endpoint(),
-                    rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
-                    included=included,
-                    extra_links=extra_links,
-                )
-
-            if is_async:
-
-                @_catch_jsonapi_errors
-                async def _async_wrapper(request, **kwargs):
-                    qp, err = _extract_or_400(
-                        handler,
-                        request,
-                        exclude=frozenset(kwargs.keys()),
-                        sparse=sparse,
-                        sparse_type_names=sparse_type_names,
-                    )
-                    if err:
-                        return err
-                    assert isinstance(qp, dict) and resource_class is not None
-                    payload, err = _parse_body_or_400(
-                        request, resource_class, schema_fn=resource_class.jsonschema_create
-                    )
-                    if err:
-                        return err
-                    result = await handler(request, payload=payload, **qp)
-                    return _build_response(result, request, qp)
-
-                wrapper_fn = _async_wrapper
-            else:
-
-                @_catch_jsonapi_errors
-                def _sync_wrapper(request, **kwargs):
-                    qp, err = _extract_or_400(
-                        handler,
-                        request,
-                        exclude=frozenset(kwargs.keys()),
-                        sparse=sparse,
-                        sparse_type_names=sparse_type_names,
-                    )
-                    if err:
-                        return err
-                    assert isinstance(qp, dict) and resource_class is not None
-                    payload, err = _parse_body_or_400(
-                        request, resource_class, schema_fn=resource_class.jsonschema_create
-                    )
-                    if err:
-                        return err
-                    result = handler(request, payload=payload, **qp)
-                    return _build_response(result, request, qp)
-
-                wrapper_fn = _sync_wrapper
-
-            wrapper = functools.update_wrapper(
-                wrapper_fn,
-                handler,
-                assigned=("__module__", "__name__", "__qualname__", "__doc__"),
-                updated=(),
-            )
-
-            self._registry.append(
-                {
-                    "type_name": type_name,
-                    "method": "create_one",
-                    "handler": wrapper,
-                    "resource_class": resource_class,
-                    "errors": errors or [],
-                    "sparse": sparse,
-                    "sparse_type_map": sparse_type_map,
-                }
-            )
-            return wrapper
-
-        return decorator
-
-    def edit_one(
-        self,
-        type_name: str,
-        errors: list[type[DjsonApiExceptionSingle]] | None = None,
-        sparse: bool = True,
-        include_types: tuple[type[Resource], ...] | None = None,
-    ) -> Callable[..., Any]:
-        def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
-            url_name = f"edit_one__{type_name}"
-            sig = inspect.signature(handler)
-            params = list(sig.parameters.values())
-            pk_param = [p for p in params if p.name != "request"][0]
-            pk_name = pk_param.name
-            pk_type = (
-                pk_param.annotation if pk_param.annotation != inspect.Parameter.empty else str
-            )
-            resource_class = None
-            for p in params:
-                if p.name != "request" and p.annotation is not inspect.Parameter.empty:
-                    if isinstance(p.annotation, type) and issubclass(p.annotation, Resource):
-                        resource_class = p.annotation
-                        break
-            _validate_handler_params(handler, exclude=frozenset([pk_name]))
-            sparse_type_map = _sparse_type_map(resource_class, include_types)
-            sparse_type_names = set(sparse_type_map.keys())
-            is_async = asyncio.iscoroutinefunction(handler)
-
-            def _build_response(result, request, query_params, kwargs):
-                raw, included, resp_links = _unwrap_response(result)
-                extra_links = _build_links(request, resp_links)
-                return _one_response(
-                    raw,
-                    url_name,
-                    kwargs,
-                    self._type_to_endpoint(),
-                    rel_to_endpoint=self._rel_to_endpoint(),
-                    rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
-                    fields=_extract_fields(query_params),
-                    included=included,
-                    extra_links=extra_links,
-                )
-
-            if is_async:
-
-                @_catch_jsonapi_errors
-                async def _async_wrapper(request, **kwargs):
-                    qp, err = _extract_or_400(
-                        handler,
-                        request,
-                        exclude=frozenset(kwargs.keys()),
-                        sparse=sparse,
-                        sparse_type_names=sparse_type_names,
-                    )
-                    if err:
-                        return err
-                    assert isinstance(qp, dict) and resource_class is not None
-                    payload, err = _parse_body_or_400(
-                        request,
-                        resource_class,
-                        schema_fn=resource_class.jsonschema_edit,
-                        fields=resource_class._edit_fields,
-                    )
-                    if err:
-                        return err
-                    result = await handler(request, payload=payload, **qp, **kwargs)
-                    return _build_response(result, request, qp, kwargs)
-
-                wrapper_fn = _async_wrapper
-            else:
-
-                @_catch_jsonapi_errors
-                def _sync_wrapper(request, **kwargs):
-                    qp, err = _extract_or_400(
-                        handler,
-                        request,
-                        exclude=frozenset(kwargs.keys()),
-                        sparse=sparse,
-                        sparse_type_names=sparse_type_names,
-                    )
-                    if err:
-                        return err
-                    assert isinstance(qp, dict) and resource_class is not None
-                    payload, err = _parse_body_or_400(
-                        request,
-                        resource_class,
-                        schema_fn=resource_class.jsonschema_edit,
-                        fields=resource_class._edit_fields,
-                    )
-                    if err:
-                        return err
-                    result = handler(request, payload=payload, **qp, **kwargs)
-                    return _build_response(result, request, qp, kwargs)
-
-                wrapper_fn = _sync_wrapper
-
-            wrapper = functools.update_wrapper(
-                wrapper_fn,
-                handler,
-                assigned=("__module__", "__name__", "__qualname__", "__doc__"),
-                updated=(),
-            )
-
-            self._registry.append(
-                {
-                    "type_name": type_name,
-                    "method": "edit_one",
-                    "handler": wrapper,
-                    "pk_name": pk_name,
-                    "pk_type": pk_type,
-                    "resource_class": resource_class,
-                    "errors": errors or [],
-                    "sparse": sparse,
-                    "sparse_type_map": sparse_type_map,
-                }
-            )
-            return wrapper
-
-        return decorator
-
-    def delete_one(
-        self, type_name: str, errors: list[type[DjsonApiExceptionSingle]] | None = None
-    ) -> Callable[..., Any]:
-        def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
-            url_name = f"delete_one__{type_name}"
-            sig = inspect.signature(handler)
-            params = list(sig.parameters.values())
-            pk_param = [p for p in params if p.name != "request"][0]
-            pk_name = pk_param.name
-            pk_type = (
-                pk_param.annotation if pk_param.annotation != inspect.Parameter.empty else str
-            )
-            is_async = asyncio.iscoroutinefunction(handler)
-
-            if is_async:
-
-                @_catch_jsonapi_errors
-                async def _async_wrapper(request, **kwargs) -> HttpResponse:
-                    await handler(request, **kwargs)
-                    return HttpResponse(status=204)
-
-                wrapper_fn = _async_wrapper
-            else:
-
-                @_catch_jsonapi_errors
-                def _sync_wrapper(request, **kwargs) -> HttpResponse:
-                    handler(request, **kwargs)
-                    return HttpResponse(status=204)
-
-                wrapper_fn = _sync_wrapper
-
-            wrapper = functools.update_wrapper(
-                wrapper_fn,
-                handler,
-                assigned=("__module__", "__name__", "__qualname__", "__doc__"),
-                updated=(),
-            )
-
-            self._registry.append(
-                {
-                    "type_name": type_name,
-                    "method": "delete_one",
-                    "handler": wrapper,
-                    "pk_name": pk_name,
-                    "pk_type": pk_type,
-                    "errors": errors or [],
-                }
-            )
-            return wrapper
-
-        return decorator
-
-    def _make_relationship_mgmt_wrapper(
-        self,
-        handler,
-        type_name,
-        rel_name,
-        pk_param,
-        rel_id_param,
-        is_plural,
-        method_name,
-        errors=None,
-    ):
-        pk_name = pk_param.name
-        pk_type = pk_param.annotation if pk_param.annotation != inspect.Parameter.empty else str
-        rel_id_name = rel_id_param.name
-        rel_id_type = (
-            rel_id_param.annotation if rel_id_param.annotation != inspect.Parameter.empty else str
-        )
-        url_name = f"{method_name}__{type_name}__{rel_name}"
-        schema = _build_relationship_schema(rel_id_type, is_plural)
-        is_async = asyncio.iscoroutinefunction(handler)
-
-        def _parse_rel_id_value(request):
-            try:
-                body = json_module.loads(request.body)
-            except json_module.JSONDecodeError as exc:
-                return None, JsonResponse(
-                    {"errors": [{"status": "400", "title": "Bad request", "detail": str(exc)}]},
-                    status=400,
-                )
-            try:
-                jsonschema.validate(body, schema)
-            except jsonschema.ValidationError as exc:
-                return None, JsonResponse(
-                    {"errors": [_validation_error_to_error_obj(exc)]},
-                    status=400,
-                    content_type="application/vnd.api+json",
-                )
-            data = body.get("data")
-            if data is None:
-                return None, None
-            if is_plural:
-                return [_convert_rel_id(item["id"], rel_id_type) for item in data], None
-            return _convert_rel_id(data["id"], rel_id_type), None
-
-        if is_async:
-
-            @_catch_jsonapi_errors
-            async def _async_wrapper(request, **kwargs) -> HttpResponse:
-                rel_id_value, err = _parse_rel_id_value(request)
-                if err:
-                    return err
-                await handler(request, **kwargs, **{rel_id_name: rel_id_value})
-                return HttpResponse(status=204)
-
-            wrapper_fn = _async_wrapper
-        else:
-
-            @_catch_jsonapi_errors
-            def _sync_wrapper(request, **kwargs) -> HttpResponse:
-                rel_id_value, err = _parse_rel_id_value(request)
-                if err:
-                    return err
-                handler(request, **kwargs, **{rel_id_name: rel_id_value})
-                return HttpResponse(status=204)
-
-            wrapper_fn = _sync_wrapper
-
-        wrapper = functools.update_wrapper(
-            wrapper_fn,
-            handler,
-            assigned=("__module__", "__name__", "__qualname__", "__doc__"),
-            updated=(),
-        )
-
-        self._registry.append(
-            {
-                "type_name": type_name,
-                "method": method_name,
-                "rel_name": rel_name,
-                "handler": wrapper,
-                "pk_name": pk_name,
-                "pk_type": pk_type,
-                "errors": errors or [],
-            }
-        )
-        return wrapper
-
-    def edit_relationship(
-        self,
-        type_name: str,
-        rel_name: str,
-        errors: list[type[DjsonApiExceptionSingle]] | None = None,
-    ) -> Callable[..., Any]:
-        def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
-            sig = inspect.signature(handler)
-            params = list(sig.parameters.values())
-            non_request = [p for p in params if p.name != "request"]
-            pk_param = non_request[0]
-            rel_id_param = non_request[1]
-            return self._make_relationship_mgmt_wrapper(
-                handler,
-                type_name,
-                rel_name,
-                pk_param,
-                rel_id_param,
-                is_plural=False,
-                method_name="edit_relationship",
-                errors=errors,
-            )
-
-        return decorator
-
-    def reset_relationship(
-        self,
-        type_name: str,
-        rel_name: str,
-        errors: list[type[DjsonApiExceptionSingle]] | None = None,
-    ) -> Callable[..., Any]:
-        def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
-            sig = inspect.signature(handler)
-            params = list(sig.parameters.values())
-            non_request = [p for p in params if p.name != "request"]
-            pk_param = non_request[0]
-            rel_id_param = non_request[1]
-            return self._make_relationship_mgmt_wrapper(
-                handler,
-                type_name,
-                rel_name,
-                pk_param,
-                rel_id_param,
-                is_plural=True,
-                method_name="reset_relationship",
-                errors=errors,
-            )
-
-        return decorator
-
-    def add_to_relationship(
-        self,
-        type_name: str,
-        rel_name: str,
-        errors: list[type[DjsonApiExceptionSingle]] | None = None,
-    ) -> Callable[..., Any]:
-        def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
-            sig = inspect.signature(handler)
-            params = list(sig.parameters.values())
-            non_request = [p for p in params if p.name != "request"]
-            pk_param = non_request[0]
-            rel_id_param = non_request[1]
-            return self._make_relationship_mgmt_wrapper(
-                handler,
-                type_name,
-                rel_name,
-                pk_param,
-                rel_id_param,
-                is_plural=True,
-                method_name="add_to_relationship",
-                errors=errors,
-            )
-
-        return decorator
-
-    def remove_from_relationship(
-        self,
-        type_name: str,
-        rel_name: str,
-        errors: list[type[DjsonApiExceptionSingle]] | None = None,
-    ) -> Callable[..., Any]:
-        def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
-            sig = inspect.signature(handler)
-            params = list(sig.parameters.values())
-            non_request = [p for p in params if p.name != "request"]
-            pk_param = non_request[0]
-            rel_id_param = non_request[1]
-            return self._make_relationship_mgmt_wrapper(
-                handler,
-                type_name,
-                rel_name,
-                pk_param,
-                rel_id_param,
-                is_plural=True,
-                method_name="remove_from_relationship",
-                errors=errors,
-            )
-
-        return decorator
-
-    def get_relationship(
-        self,
-        type_name: str,
-        rel_name: str,
-        errors: list[type[DjsonApiExceptionSingle]] | None = None,
-        sparse: bool = True,
-        include_types: tuple[type[Resource], ...] | None = None,
-    ) -> Callable[..., Any]:
-        def decorator(handler: Callable[..., Any]) -> Callable[..., Any]:
-            url_name = f"get_relationship__{type_name}__{rel_name}"
-            sig = inspect.signature(handler)
-            params = list(sig.parameters.values())
-            pk_param = [p for p in params if p.name != "request"][0]
-            pk_name = pk_param.name
-            pk_type = (
-                pk_param.annotation if pk_param.annotation != inspect.Parameter.empty else str
-            )
-            _validate_handler_params(handler, exclude=frozenset([pk_name]))
-            return_type = sig.return_annotation
-            origin = get_origin(return_type)
-            resource_class = None
-            is_plural = False
-            if origin is list:
-                is_plural = True
-                args = get_args(return_type)
-                if args:
-                    rc = args[0]
-                    if isinstance(rc, type) and issubclass(rc, Resource):
-                        resource_class = rc
-            elif origin is Response:
-                args = get_args(return_type)
-                if args:
-                    inner = args[0]
-                    inner_origin = get_origin(inner)
-                    if inner_origin is list:
-                        is_plural = True
-                        inner_args = get_args(inner)
-                        if inner_args:
-                            rc = inner_args[0]
-                            if isinstance(rc, type) and issubclass(rc, Resource):
-                                resource_class = rc
-            elif (
-                return_type is not inspect.Parameter.empty
-                and isinstance(return_type, type)
-                and issubclass(return_type, Resource)
-            ):
-                resource_class = return_type
-            sparse_type_map = _sparse_type_map(resource_class, include_types)
-            sparse_type_names = set(sparse_type_map.keys())
-            is_async = asyncio.iscoroutinefunction(handler)
-
-            def _build_response(result, request, query_params, kwargs):
-                raw, included, resp_links = _unwrap_response(result)
-                extra_links = _build_links(request, resp_links)
-                rel = self._rel_to_endpoint()
-                rel_mgmt = self._rel_mgmt_to_endpoint()
-                if is_plural:
-                    return _many_response(
-                        raw,
-                        url_name,
-                        self._type_to_endpoint(),
-                        rel_to_endpoint=rel,
-                        rel_mgmt_to_endpoint=rel_mgmt,
-                        fields=_extract_fields(query_params),
-                        included=included,
-                        url_kwargs=kwargs,
-                        extra_links=extra_links,
-                    )
-                return _one_response(
-                    raw,
-                    url_name,
-                    kwargs,
-                    self._type_to_endpoint(),
-                    rel_to_endpoint=rel,
-                    rel_mgmt_to_endpoint=rel_mgmt,
-                    fields=_extract_fields(query_params),
-                    included=included,
-                    extra_links=extra_links,
-                )
-
-            if is_async:
-
-                @_catch_jsonapi_errors
-                async def _async_wrapper(request, **kwargs):
-                    qp, err = _extract_or_400(
-                        handler,
-                        request,
-                        exclude=frozenset(kwargs.keys()),
-                        sparse=sparse,
-                        sparse_type_names=sparse_type_names,
-                    )
-                    if err:
-                        return err
-                    assert isinstance(qp, dict)
-                    result = await handler(request, **qp, **kwargs)
-                    return _build_response(result, request, qp, kwargs)
-
-                wrapper_fn = _async_wrapper
-            else:
-
-                @_catch_jsonapi_errors
-                def _sync_wrapper(request, **kwargs):
-                    qp, err = _extract_or_400(
-                        handler,
-                        request,
-                        exclude=frozenset(kwargs.keys()),
-                        sparse=sparse,
-                        sparse_type_names=sparse_type_names,
-                    )
-                    if err:
-                        return err
-                    assert isinstance(qp, dict)
-                    result = handler(request, **qp, **kwargs)
-                    return _build_response(result, request, qp, kwargs)
-
-                wrapper_fn = _sync_wrapper
-
-            wrapper = functools.update_wrapper(
-                wrapper_fn,
-                handler,
-                assigned=("__module__", "__name__", "__qualname__", "__doc__"),
-                updated=(),
-            )
-
-            self._registry.append(
-                {
-                    "type_name": type_name,
-                    "method": "get_relationship",
-                    "rel_name": rel_name,
-                    "handler": wrapper,
-                    "pk_name": pk_name,
-                    "pk_type": pk_type,
-                    "resource_class": resource_class,
-                    "is_plural": is_plural,
-                    "errors": errors or [],
-                    "sparse": sparse,
-                    "sparse_type_map": sparse_type_map,
-                }
-            )
-            return wrapper
-
-        return decorator
-
-    @property
-    def urls(self):
-        groups: dict = {}
-        for entry in self._registry:
-            type_name = entry["type_name"]
-            if entry["method"] == "get_one":
-                pk_name = entry["pk_name"]
-                django_type = _PYTHON_TO_DJANGO_PATH.get(entry["pk_type"], "str")
-                path_str = f"{type_name}/<{django_type}:{pk_name}>"
-                groups.setdefault(path_str, {})["GET"] = (
-                    entry["handler"],
-                    f"get_one__{type_name}",
-                )
-            elif entry["method"] == "get_many":
-                path_str = f"{type_name}/"
-                groups.setdefault(path_str, {})["GET"] = (
-                    entry["handler"],
-                    f"get_many__{type_name}",
-                )
-            elif entry["method"] == "create_one":
-                path_str = f"{type_name}/"
-                groups.setdefault(path_str, {})["POST"] = (
-                    entry["handler"],
-                    f"create_one__{type_name}",
-                )
-            elif entry["method"] == "edit_one":
-                pk_name = entry["pk_name"]
-                django_type = _PYTHON_TO_DJANGO_PATH.get(entry["pk_type"], "str")
-                path_str = f"{type_name}/<{django_type}:{pk_name}>"
-                groups.setdefault(path_str, {})["PATCH"] = (
-                    entry["handler"],
-                    f"edit_one__{type_name}",
-                )
-            elif entry["method"] == "delete_one":
-                pk_name = entry["pk_name"]
-                django_type = _PYTHON_TO_DJANGO_PATH.get(entry["pk_type"], "str")
-                path_str = f"{type_name}/<{django_type}:{pk_name}>"
-                groups.setdefault(path_str, {})["DELETE"] = (
-                    entry["handler"],
-                    f"delete_one__{type_name}",
-                )
-            elif entry["method"] == "get_relationship":
-                pk_name = entry["pk_name"]
-                django_type = _PYTHON_TO_DJANGO_PATH.get(entry["pk_type"], "str")
-                path_str = f"{type_name}/<{django_type}:{pk_name}>/{entry['rel_name']}"
-                groups.setdefault(path_str, {})["GET"] = (
-                    entry["handler"],
-                    f"get_relationship__{type_name}__{entry['rel_name']}",
-                )
-            elif entry["method"] in (
-                "edit_relationship",
-                "reset_relationship",
-                "add_to_relationship",
-                "remove_from_relationship",
-            ):
-                pk_name = entry["pk_name"]
-                django_type = _PYTHON_TO_DJANGO_PATH.get(entry["pk_type"], "str")
-                path_str = (
-                    f"{type_name}/<{django_type}:{pk_name}>/relationships/{entry['rel_name']}"
-                )
-                method_map = {
-                    "edit_relationship": "PATCH",
-                    "reset_relationship": "PATCH",
-                    "add_to_relationship": "POST",
-                    "remove_from_relationship": "DELETE",
-                }
-                http_method = method_map[entry["method"]]
-                groups.setdefault(path_str, {})[http_method] = (
-                    entry["handler"],
-                    f"{entry['method']}__{type_name}__{entry['rel_name']}",
-                )
-        result = []
-        for path_str, methods in groups.items():
-            if len(methods) == 1:
-                (handler, name) = next(iter(methods.values()))
-                result.append(path(path_str, handler, name=name))
-            else:
-                dispatch = _CombinedView({m: h for m, (h, _) in methods.items()})
-                for _, name in methods.values():
-                    result.append(path(path_str, dispatch, name=name))
-        result.append(path("openapi.json", self._openapi_view, name="openapi"))
-        result.append(path("docs/", self._docs_view, name="docs"))
-        return result
-
-    def _type_to_endpoint(self) -> dict[str, dict]:
-        result = {}
-        for entry in self._registry:
-            if entry["method"] != "get_one":
-                continue
-            result[entry["type_name"]] = {
-                "url_name": f"get_one__{entry['type_name']}",
-                "pk_name": entry["pk_name"],
-            }
-        return result
-
-    def _rel_to_endpoint(self) -> dict[tuple[str, str], dict]:
-        result = {}
-        for entry in self._registry:
-            if entry["method"] != "get_relationship":
-                continue
-            result[(entry["type_name"], entry["rel_name"])] = {
-                "url_name": f"get_relationship__{entry['type_name']}__{entry['rel_name']}",
-                "pk_name": entry["pk_name"],
-            }
-        return result
-
-    def _rel_mgmt_to_endpoint(self) -> dict[tuple[str, str], dict]:
-        result = {}
-        for entry in self._registry:
-            if entry["method"] not in (
-                "edit_relationship",
-                "reset_relationship",
-                "add_to_relationship",
-                "remove_from_relationship",
-            ):
-                continue
-            key = (entry["type_name"], entry["rel_name"])
-            if key not in result:
-                result[key] = {
-                    "url_name": f"{entry['method']}__{entry['type_name']}__{entry['rel_name']}",
-                    "pk_name": entry["pk_name"],
-                }
-        return result
-
-    def _openapi_view(self, request: HttpRequest) -> JsonResponse:
-        return JsonResponse(self._build_openapi_spec())
-
-    def _docs_view(self, request: HttpRequest) -> HttpResponse:
-        try:
-            openapi_url = reverse("openapi")
-        except (NoReverseMatch, ImproperlyConfigured):
-            openapi_url = "/openapi.json"
-        html = f"""<!DOCTYPE html>
-<html>
-<head>
-  <title>API Docs</title>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-</head>
-<body>
-  <redoc spec-url='{openapi_url}'></redoc>
-  <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
-</body>
-</html>"""
-        return HttpResponse(html.encode(), content_type="text/html")
-
-    def _build_openapi_spec(self) -> dict:
-        spec: dict = {
-            "openapi": "3.0.3",
-            "info": {"title": "API", "version": "1.0.0"},
-            "paths": {},
-            "components": {"schemas": {}},
-        }
-        for entry in self._registry:
-            type_name = entry["type_name"]
-            resource_class = entry.get("resource_class")
-            type_to_endpoint = self._type_to_endpoint()
-            raw_name = entry["handler"].__name__.replace("_", " ")
-            summary = raw_name[0].upper() + raw_name[1:] if raw_name else raw_name
-
-            if entry["method"] == "get_one":
-                pk_name = entry["pk_name"]
-                pk_type = entry["pk_type"]
-                param_schema = _PYTHON_TO_OPENAPI.get(pk_type, {"type": "string"})
-                path_str = f"/{type_name}/{{{pk_name}}}"
-                path_item = spec["paths"].setdefault(path_str, {})
-                response_schema: dict = {}
-                if resource_class:
-                    response_schema = _response_schema(
-                        type_name,
-                        resource_class,
-                        type_to_endpoint,
-                        spec,
-                        rel_to_endpoint=self._rel_to_endpoint(),
-                        rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
-                        has_include=_handler_has_include(entry["handler"]),
-                    )
-                path_item["get"] = {
-                    "tags": [type_name],
-                    "summary": summary,
-                    "parameters": [
-                        {
-                            "name": pk_name,
-                            "in": "path",
-                            "required": True,
-                            "schema": param_schema,
-                        }
-                    ],
-                    "responses": {
-                        "200": {
-                            "description": "OK",
-                            "content": {
-                                "application/vnd.api+json": {
-                                    "schema": response_schema or {"type": "object"}
-                                }
-                            },
-                        }
-                    },
-                }
-                _add_query_params_to_op(entry["handler"], path_item["get"])
-                _add_sparse_params_to_op(
-                    entry.get("sparse", True), entry.get("sparse_type_map", {}), path_item["get"]
-                )
-
-            elif entry["method"] == "get_many":
-                path_str = f"/{type_name}/"
-                path_item = spec["paths"].setdefault(path_str, {})
-                response_schema = _response_schema(
-                    type_name,
-                    resource_class,
-                    type_to_endpoint,
-                    spec,
-                    rel_to_endpoint=self._rel_to_endpoint(),
-                    rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
-                    has_include=_handler_has_include(entry["handler"]),
-                )
-                path_item["get"] = {
-                    "tags": [type_name],
-                    "summary": summary,
-                    "responses": {
-                        "200": {
-                            "description": "OK",
-                            "content": {
-                                "application/vnd.api+json": {
-                                    "schema": response_schema or {"type": "object"}
-                                }
-                            },
-                        }
-                    },
-                }
-                _add_query_params_to_op(entry["handler"], path_item["get"])
-                _add_sparse_params_to_op(
-                    entry.get("sparse", True), entry.get("sparse_type_map", {}), path_item["get"]
-                )
-
-            elif entry["method"] == "create_one":
-                path_str = f"/{type_name}/"
-                path_item = spec["paths"].setdefault(path_str, {})
-                response_schema: dict = {}
-                if resource_class:
-                    response_schema = _response_schema(
-                        type_name,
-                        resource_class,
-                        type_to_endpoint,
-                        spec,
-                        rel_to_endpoint=self._rel_to_endpoint(),
-                        rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
-                        has_include=_handler_has_include(entry["handler"]),
-                    )
-                path_item["post"] = {
-                    "tags": [type_name],
-                    "summary": summary,
-                    "requestBody": {
-                        "required": True,
-                        "content": {
-                            "application/vnd.api+json": {
-                                "schema": resource_class.jsonschema_create()
-                                if resource_class
-                                else {"type": "object"},
-                            }
-                        },
-                    },
-                    "responses": {
-                        "201": {
-                            "description": "Created",
-                            "content": {
-                                "application/vnd.api+json": {
-                                    "schema": response_schema or {"type": "object"}
-                                }
-                            },
-                        },
-                    },
-                }
-                _add_query_params_to_op(entry["handler"], path_item["post"])
-                _add_sparse_params_to_op(
-                    entry.get("sparse", True), entry.get("sparse_type_map", {}), path_item["post"]
-                )
-
-            elif entry["method"] == "edit_one":
-                pk_name = entry["pk_name"]
-                pk_type = entry["pk_type"]
-                param_schema = _PYTHON_TO_OPENAPI.get(pk_type, {"type": "string"})
-                path_str = f"/{type_name}/{{{pk_name}}}"
-                path_item = spec["paths"].setdefault(path_str, {})
-                response_schema: dict = {}
-                if resource_class:
-                    response_schema = _response_schema(
-                        type_name,
-                        resource_class,
-                        type_to_endpoint,
-                        spec,
-                        rel_to_endpoint=self._rel_to_endpoint(),
-                        rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
-                        has_include=_handler_has_include(entry["handler"]),
-                    )
-                path_item["patch"] = {
-                    "tags": [type_name],
-                    "summary": summary,
-                    "parameters": [
-                        {
-                            "name": pk_name,
-                            "in": "path",
-                            "required": True,
-                            "schema": param_schema,
-                        }
-                    ],
-                    "requestBody": {
-                        "required": True,
-                        "content": {
-                            "application/vnd.api+json": {
-                                "schema": resource_class.jsonschema_edit()
-                                if resource_class
-                                else {"type": "object"},
-                            }
-                        },
-                    },
-                    "responses": {
-                        "200": {
-                            "description": "OK",
-                            "content": {
-                                "application/vnd.api+json": {
-                                    "schema": response_schema or {"type": "object"}
-                                }
-                            },
-                        },
-                    },
-                }
-                _add_query_params_to_op(entry["handler"], path_item["patch"])
-                _add_sparse_params_to_op(
-                    entry.get("sparse", True), entry.get("sparse_type_map", {}), path_item["patch"]
-                )
-
-            elif entry["method"] == "delete_one":
-                pk_name = entry["pk_name"]
-                pk_type = entry["pk_type"]
-                param_schema = _PYTHON_TO_OPENAPI.get(pk_type, {"type": "string"})
-                path_str = f"/{type_name}/{{{pk_name}}}"
-                path_item = spec["paths"].setdefault(path_str, {})
-                path_item["delete"] = {
-                    "tags": [type_name],
-                    "summary": summary,
-                    "parameters": [
-                        {
-                            "name": pk_name,
-                            "in": "path",
-                            "required": True,
-                            "schema": param_schema,
-                        }
-                    ],
-                    "responses": {
-                        "204": {"description": "No Content"},
-                    },
-                }
-            elif entry["method"] == "get_relationship":
-                pk_name = entry["pk_name"]
-                pk_type = entry["pk_type"]
-                rel_name = entry["rel_name"]
-                param_schema = _PYTHON_TO_OPENAPI.get(pk_type, {"type": "string"})
-                path_str = f"/{type_name}/{{{pk_name}}}/{rel_name}"
-                path_item = spec["paths"].setdefault(path_str, {})
-                response_schema: dict = {}
-                if resource_class:
-                    rel_type_name = resource_class._type
-                    if entry["is_plural"]:
-                        _ensure_schema(
-                            rel_type_name,
-                            resource_class,
-                            type_to_endpoint,
-                            spec,
-                            rel_to_endpoint=self._rel_to_endpoint(),
-                            rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
-                        )
-                        has_include = _handler_has_include(entry["handler"])
-                        links_schema: dict = {
-                            "type": "object",
-                            "properties": {
-                                "self": {"type": "string"},
-                            },
-                            "additionalProperties": {"type": "string"},
-                        }
-                        properties: dict = {
-                            "data": {
-                                "type": "array",
-                                "items": {
-                                    "$ref": f"#/components/schemas/{rel_type_name}_resource"
-                                },
-                            },
-                            "jsonapi": {
-                                "type": "object",
-                                "properties": {"version": {"const": "1.0"}},
-                            },
-                            "links": links_schema,
-                        }
-                        if has_include:
-                            properties["included"] = {
-                                "type": "array",
-                                "items": {"type": "object"},
-                            }
-                        response_schema = {
-                            "type": "object",
-                            "properties": properties,
-                            "required": ["data", "jsonapi"],
-                        }
-                    else:
-                        response_schema = _response_schema(
-                            rel_type_name,
-                            resource_class,
-                            type_to_endpoint,
-                            spec,
-                            rel_mgmt_to_endpoint=self._rel_mgmt_to_endpoint(),
-                            has_include=_handler_has_include(entry["handler"]),
-                        )
-                path_item["get"] = {
-                    "tags": [type_name],
-                    "summary": summary,
-                    "parameters": [
-                        {
-                            "name": pk_name,
-                            "in": "path",
-                            "required": True,
-                            "schema": param_schema,
-                        }
-                    ],
-                    "responses": {
-                        "200": {
-                            "description": "OK",
-                            "content": {
-                                "application/vnd.api+json": {
-                                    "schema": response_schema or {"type": "object"}
-                                }
-                            },
-                        }
-                    },
-                }
-                _add_query_params_to_op(entry["handler"], path_item["get"])
-                _add_sparse_params_to_op(
-                    entry.get("sparse", True), entry.get("sparse_type_map", {}), path_item["get"]
-                )
-            elif entry["method"] in (
-                "edit_relationship",
-                "reset_relationship",
-                "add_to_relationship",
-                "remove_from_relationship",
-            ):
-                pk_name = entry["pk_name"]
-                pk_type = entry["pk_type"]
-                rel_name = entry["rel_name"]
-                param_schema = _PYTHON_TO_OPENAPI.get(pk_type, {"type": "string"})
-                path_str = f"/{type_name}/{{{pk_name}}}/relationships/{rel_name}"
-                path_item = spec["paths"].setdefault(path_str, {})
-                raw_handler = inspect.unwrap(entry["handler"])
-                sig = inspect.signature(raw_handler)
-                non_request = [p for p in list(sig.parameters.values()) if p.name != "request"]
-                rel_id_param = non_request[1]
-                rel_id_type = (
-                    rel_id_param.annotation
-                    if rel_id_param.annotation != inspect.Parameter.empty
-                    else str
-                )
-                is_plural = entry["method"] in (
-                    "reset_relationship",
-                    "add_to_relationship",
-                    "remove_from_relationship",
-                )
-                request_schema = _build_relationship_schema(rel_id_type, is_plural)
-                http_method_map = {
-                    "edit_relationship": "patch",
-                    "reset_relationship": "patch",
-                    "add_to_relationship": "post",
-                    "remove_from_relationship": "delete",
-                }
-                http_method = http_method_map[entry["method"]]
-                path_item[http_method] = {
-                    "tags": [type_name],
-                    "summary": summary,
-                    "parameters": [
-                        {
-                            "name": pk_name,
-                            "in": "path",
-                            "required": True,
-                            "schema": param_schema,
-                        }
-                    ],
-                    "requestBody": {
-                        "required": True,
-                        "content": {
-                            "application/vnd.api+json": {
-                                "schema": request_schema,
-                            }
-                        },
-                    },
-                    "responses": {
-                        "204": {"description": "No Content"},
-                    },
-                }
-
-            if entry.get("errors"):
-                method = entry["method"]
-                _ENTRY_METHOD_TO_HTTP = {
-                    "get_one": "get",
-                    "get_many": "get",
-                    "create_one": "post",
-                    "edit_one": "patch",
-                    "delete_one": "delete",
-                    "get_relationship": "get",
-                    "edit_relationship": "patch",
-                    "reset_relationship": "patch",
-                    "add_to_relationship": "post",
-                    "remove_from_relationship": "delete",
-                }
-                http_method = _ENTRY_METHOD_TO_HTTP[method]
-                if method in ("get_one", "edit_one", "delete_one"):
-                    pk_name = entry["pk_name"]
-                    path_str = f"/{type_name}/{{{pk_name}}}"
-                elif method in ("get_many", "create_one"):
-                    path_str = f"/{type_name}/"
-                elif method == "get_relationship":
-                    path_str = f"/{type_name}/{{{entry['pk_name']}}}/{entry['rel_name']}"
-                elif method in (
-                    "edit_relationship",
-                    "reset_relationship",
-                    "add_to_relationship",
-                    "remove_from_relationship",
-                ):
-                    path_str = (
-                        f"/{type_name}/{{{entry['pk_name']}}}/relationships/{entry['rel_name']}"
-                    )
-                else:
-                    path_str = None
-                if path_str:
-                    op = spec["paths"][path_str].get(http_method)
-                    if op:
-                        for ex_class in entry["errors"]:
-                            status_code = str(ex_class.STATUS)
-                            ex_title = (
-                                ex_class.TITLE
-                                if ex_class.TITLE is not None
-                                else _class_name_to_title(ex_class.__name__)
-                            )
-                            op["responses"][status_code] = {
-                                "description": ex_title,
-                                "content": {
-                                    "application/vnd.api+json": {
-                                        "schema": {
-                                            "type": "object",
-                                            "properties": {
-                                                "errors": {
-                                                    "type": "array",
-                                                    "items": {"type": "object"},
-                                                },
-                                            },
-                                        },
-                                    },
-                                },
-                            }
-
-        schema_names = list(spec["components"]["schemas"].keys())
-        if schema_names:
-            endpoint_tags = sorted(set(entry["type_name"] for entry in self._registry))
-            schema_tags = []
-            for schema_name in schema_names:
-                type_name = schema_name.removesuffix("_resource")
-                tag_name = f"{type_name}_schema"
-                schema_tags.append(tag_name)
-                spec.setdefault("tags", []).append(
-                    {
-                        "name": tag_name,
-                        "x-displayName": type_name,
-                        "description": f'<SchemaDefinition schemaRef="#/components/schemas/{schema_name}" />',
-                    }
-                )
-            spec["x-tagGroups"] = [
-                {"name": "Endpoints", "tags": endpoint_tags},
-                {"name": "Schemas", "tags": schema_tags},
-            ]
-        return spec
-
-
-def _is_nullable(tp: type) -> bool:
+def _type_to_openapi_schema(tp: type) -> dict:
     origin = get_origin(tp)
-    if origin is types.UnionType or origin is Union:
-        return type(None) in get_args(tp)
+    args = get_args(tp)
+    if origin is list:
+        item_tp = args[0] if args else str
+        return {"type": "array", "items": _type_to_openapi_schema(item_tp)}
+    return _PYTHON_TO_OPENAPI.get(tp, {"type": "string"})
+
+
+def _annotation_is_list(annotation: type) -> bool:
+    origin = get_origin(annotation)
+    if origin is list or origin is Sequence:
+        return True
+    if origin is not None:
+        return any(
+            get_origin(arg) is list or get_origin(arg) is Sequence
+            for arg in get_args(annotation)
+            if arg is not type(None)
+        )
     return False
 
 
@@ -1473,122 +80,6 @@ def _query_param_name(name: str) -> str:
     if name.startswith("extra__"):
         return name[len("extra__") :]
     raise ValueError(f"Unknown query parameter: {name}")
-
-
-def _validate_and_convert(raw: str, tp: type, query_name: str) -> Any:
-    origin = get_origin(tp)
-    if origin is list:
-        args = get_args(tp)
-        item_tp = args[0] if args else str
-        if not raw.strip():
-            return []
-        return [
-            _validate_and_convert(item.strip(), item_tp, query_name) for item in raw.split(",")
-        ]
-    if tp is int:
-        return int(raw)
-    if tp is float:
-        return float(raw)
-    if tp is bool:
-        if raw.lower() in ("true", "1"):
-            return True
-        if raw.lower() in ("false", "0"):
-            return False
-        raise ValueError(f"Invalid boolean value for '{query_name}': '{raw}'")
-    return raw
-
-
-def _extract_fields(query_params: dict) -> dict | None:
-    fields = {}
-    for k, v in query_params.items():
-        if k.startswith("fields__"):
-            type_name = k.split("__", 1)[1]
-            fields[type_name] = v
-    return fields if fields else None
-
-
-def _inject_sparse_fields(
-    query_params: dict, request: HttpRequest, sparse: bool, sparse_type_names: set[str]
-) -> None:
-    if sparse:
-        for type_name in sparse_type_names:
-            key = f"fields__{type_name}"
-            if key not in query_params:
-                raw = request.GET.get(f"fields[{type_name}]")
-                if raw is not None:
-                    query_params[key] = raw
-    else:
-        for key in request.GET:
-            if key.startswith("fields[") and key.endswith("]"):
-                raise ValueError(f"Sparse fieldsets not supported for this endpoint. Got '{key}'")
-
-
-def _sparse_type_map(
-    resource_class: type[Resource] | None, include_types: tuple[type[Resource], ...] | None
-) -> dict[str, type[Resource]]:
-    mapping: dict[str, type[Resource]] = {}
-    if resource_class:
-        mapping[resource_class._type] = resource_class
-    if include_types:
-        for t in include_types:
-            mapping[t._type] = t
-    return mapping
-
-
-def _extract_query_params(
-    handler: Callable, request: HttpRequest, exclude: frozenset = frozenset()
-) -> dict:
-    sig = inspect.signature(handler)
-    result: dict = {}
-
-    include_suffixes = []
-    for name in sig.parameters:
-        if name == "request" or name in exclude:
-            continue
-        if name.startswith("include__"):
-            include_suffixes.append(name[len("include__") :])
-
-    if include_suffixes:
-        raw_include = request.GET.get("include", "")
-        assert isinstance(raw_include, str)
-        included_set = set(raw_include.split(",")) if raw_include.strip() else set()
-        unknown = included_set - set(include_suffixes)
-        if unknown:
-            raise ValueError(f"Unknown include values: {', '.join(sorted(unknown))}")
-        for suffix in include_suffixes:
-            param = sig.parameters[f"include__{suffix}"]
-            default = param.default if param.default != inspect.Parameter.empty else False
-            result[f"include__{suffix}"] = suffix in included_set
-
-    for name, param in sig.parameters.items():
-        if name == "request" or name in exclude or name in result:
-            continue
-        annotation = param.annotation if param.annotation != inspect.Parameter.empty else str
-        if isinstance(annotation, type) and issubclass(annotation, Resource):
-            continue
-
-        default = param.default if param.default != inspect.Parameter.empty else _MUTABLE_DEFAULT
-        query_name = _query_param_name(name)
-
-        raw = request.GET.get(query_name)
-        if raw is None:
-            if default is _MUTABLE_DEFAULT:
-                raise ValueError(f"Missing required query parameter: {query_name}")
-            result[name] = default
-        else:
-            assert isinstance(raw, str)
-            result[name] = _validate_and_convert(raw, annotation, query_name)
-
-    return result
-
-
-def _type_to_openapi_schema(tp: type) -> dict:
-    origin = get_origin(tp)
-    args = get_args(tp)
-    if origin is list:
-        item_tp = args[0] if args else str
-        return {"type": "array", "items": _type_to_openapi_schema(item_tp)}
-    return _PYTHON_TO_OPENAPI.get(tp, {"type": "string"})
 
 
 def _handler_query_params(handler: Callable) -> list[dict]:
@@ -1619,7 +110,10 @@ def _handler_query_params(handler: Callable) -> list[dict]:
             continue
         if name.startswith("include__"):
             continue
-        if not any(name.startswith(p) for p in _VALID_PREFIXES):
+        if not any(
+            name.startswith(p)
+            for p in ("filter__", "page", "sort", "include__", "fields__", "extra__")
+        ):
             continue
 
         has_default = param.default is not inspect.Parameter.empty
@@ -1630,20 +124,19 @@ def _handler_query_params(handler: Callable) -> list[dict]:
             "required": not has_default,
             "schema": _type_to_openapi_schema(annotation),
         }
-        if has_default and param.default is not None:
-            default = param.default
-            if isinstance(default, (str, int, float, bool)):
-                param_obj["schema"]["default"] = default
+        if (
+            has_default
+            and param.default is not None
+            and isinstance(param.default, (str, int, float, bool))
+        ):
+            param_obj["schema"]["default"] = param.default
         params.append(param_obj)
     return params
 
 
-def _handler_has_include(handler: Callable) -> bool:
-    sig = inspect.signature(inspect.unwrap(handler))
-    return any(name.startswith("include__") for name in sig.parameters)
-
-
-def _sparse_field_names(resource_class: type[Resource]) -> list[str]:
+def _sparse_field_names(resource_class: type[Resource] | None) -> list[str]:
+    if resource_class is None:
+        return []
     names: list[str] = []
     if resource_class._attributes:
         names.extend(resource_class._attributes)
@@ -1654,451 +147,46 @@ def _sparse_field_names(resource_class: type[Resource]) -> list[str]:
     return names
 
 
-def _add_sparse_params_to_op(
-    sparse: bool, sparse_type_map: dict[str, type[Resource]], op: dict
-) -> None:
-    if not sparse:
-        return
-    for type_name in sorted(sparse_type_map):
-        field_names = _sparse_field_names(sparse_type_map[type_name])
-        desc = (
-            f"Comma-separated list of fields. Available fields: {', '.join(field_names)}."
-            if field_names
-            else "Comma-separated list of fields."
-        )
-        op.setdefault("parameters", []).append(
-            {
-                "name": f"fields[{type_name}]",
-                "in": "query",
-                "required": False,
-                "schema": {"type": "string"},
-                "description": desc,
-            }
-        )
-
-
-def _add_query_params_to_op(handler: Callable, op: dict) -> None:
-    query_params = _handler_query_params(inspect.unwrap(handler))
-    if query_params:
-        op.setdefault("parameters", []).extend(query_params)
-
-
-def _build_relationship_schema(rel_id_type: type, is_plural: bool) -> dict:
-    if is_plural:
-        args = get_args(rel_id_type)
-        effective_id_type = args[0] if args else str
-    elif _is_nullable(rel_id_type):
-        non_null_args = [a for a in get_args(rel_id_type) if a is not type(None)]
-        effective_id_type = non_null_args[0] if non_null_args else str
-    else:
-        effective_id_type = rel_id_type
-    id_schema = _type_to_openapi_schema(effective_id_type)
-    item_schema: dict = {
-        "type": "object",
-        "properties": {
-            "id": id_schema,
-            "type": {"type": "string"},
-        },
-        "required": ["id", "type"],
-    }
-    if is_plural:
-        data_schema: dict = {
-            "type": "array",
-            "items": item_schema,
-        }
-    else:
-        nullable = _is_nullable(rel_id_type)
-        if nullable:
-            data_schema = {"oneOf": [{"type": "null"}, item_schema]}
-        else:
-            data_schema = item_schema
-    return {
-        "type": "object",
-        "properties": {"data": data_schema},
-        "required": ["data"],
-    }
-
-
-def _unwrap_response(raw):
-    if isinstance(raw, Response):
-        return raw.data, list(raw.included) if raw.included else None, raw.links
-    return raw, None, None
-
-
-def _build_links(request, link_defs):
-    if not link_defs:
-        return {}
-    base = dict(request.GET.items())
-    result = {}
-    for rel, params in link_defs.items():
-        merged = {**base, **params}
-        qs = urlencode(merged, doseq=True)
-        result[rel] = f"{request.path}?{qs}" if qs else request.path
-    return result
-
-
-def _validate_handler_params(handler: Callable, exclude: frozenset = frozenset()) -> None:
-    sig = inspect.signature(handler)
-    for name, param in sig.parameters.items():
-        if name == "request" or name in exclude:
-            continue
-        annotation = param.annotation if param.annotation != inspect.Parameter.empty else str
-        if isinstance(annotation, type) and issubclass(annotation, Resource):
-            continue
-        if not any(name.startswith(p) for p in _VALID_PREFIXES):
-            raise ImproperlyConfigured(
-                f"Invalid parameter '{name}' in handler '{handler.__name__}'. "
-                f"Must start with one of: {', '.join(_VALID_PREFIXES)}"
-            )
-
-
-def _catch_jsonapi_errors(f):
-    is_async = asyncio.iscoroutinefunction(f)
-    if is_async:
-
-        @functools.wraps(f)
-        async def async_wrapper(*args, **kwargs):
-            try:
-                return await f(*args, **kwargs)
-            except DjsonApiException as exc:
-                return JsonResponse(
-                    {"errors": exc.render()},
-                    status=exc.status,
-                    content_type="application/vnd.api+json",
-                )
-            except Exception as exc:
-                ise = InternalServerError(str(exc))
-                return JsonResponse(
-                    {"errors": ise.render()},
-                    status=ise.status,
-                    content_type="application/vnd.api+json",
-                )
-
-        return async_wrapper
-
-    @functools.wraps(f)
-    def sync_wrapper(*args, **kwargs):
-        try:
-            return f(*args, **kwargs)
-        except DjsonApiException as exc:
-            return JsonResponse(
-                {"errors": exc.render()},
-                status=exc.status,
-                content_type="application/vnd.api+json",
-            )
-        except Exception as exc:
-            ise = InternalServerError(str(exc))
-            return JsonResponse(
-                {"errors": ise.render()},
-                status=ise.status,
-                content_type="application/vnd.api+json",
-            )
-
-    return sync_wrapper
-
-
-def _extract_or_400(
-    handler, request, exclude=frozenset(), sparse=False, sparse_type_names: set[str] | None = None
-):
-    try:
-        query_params = _extract_query_params(handler, request, exclude=exclude)
-        if sparse and sparse_type_names is not None:
-            _inject_sparse_fields(query_params, request, True, sparse_type_names)
-        return query_params, None
-    except ValueError as exc:
-        return None, JsonResponse(
-            {"errors": [{"status": "400", "title": "Bad request", "detail": str(exc)}]},
-            status=400,
-        )
-
-
-def _parse_body_or_400(request, resource_class, schema_fn=None, fields=None):
-    try:
-        body = json_module.loads(request.body)
-    except json_module.JSONDecodeError as exc:
-        return None, JsonResponse(
-            {"errors": [{"status": "400", "title": "Bad request", "detail": str(exc)}]},
-            status=400,
-        )
-    data = body.get("data", {})
-    try:
-        if schema_fn:
-            jsonschema.validate(data, schema_fn())
-    except jsonschema.ValidationError as exc:
-        return None, JsonResponse(
-            {"errors": [_validation_error_to_error_obj(exc)]},
-            status=400,
-            content_type="application/vnd.api+json",
-        )
-    payload = resource_class._from_jsonapi_payload(body, fields=fields)
-    return payload, None
-
-
-def _add_relationship_links(
-    resource, type_to_endpoint, rel_to_endpoint=None, rel_mgmt_to_endpoint=None
-):
-    parent_type = resource.get("type")
-    for rel_field, rel_data in resource.get("relationships", {}).items():
-        if rel_mgmt_to_endpoint:
-            mgmt = rel_mgmt_to_endpoint.get((parent_type, rel_field))
-            if mgmt:
-                try:
-                    self_url = reverse(
-                        mgmt["url_name"],
-                        kwargs={mgmt["pk_name"]: resource["id"]},
-                    )
-                    rel_data.setdefault("links", {})["self"] = self_url
-                except (NoReverseMatch, ImproperlyConfigured):
-                    pass
-        data = rel_data.get("data")
-        if isinstance(data, dict):
-            if rel_to_endpoint:
-                rel_endpoint = rel_to_endpoint.get((parent_type, rel_field))
-                if rel_endpoint:
-                    try:
-                        related_url = reverse(
-                            rel_endpoint["url_name"],
-                            kwargs={rel_endpoint["pk_name"]: resource["id"]},
-                        )
-                        rel_data.setdefault("links", {})["related"] = related_url
-                        continue
-                    except (NoReverseMatch, ImproperlyConfigured):
-                        pass
-            rel_type = data.get("type")
-            endpoint = type_to_endpoint.get(rel_type)
-            if endpoint:
-                try:
-                    related_url = reverse(
-                        endpoint["url_name"],
-                        kwargs={endpoint["pk_name"]: data["id"]},
-                    )
-                    rel_data.setdefault("links", {})["related"] = related_url
-                except (NoReverseMatch, ImproperlyConfigured):
-                    pass
-        elif isinstance(data, list):
-            if rel_to_endpoint:
-                rel_endpoint = rel_to_endpoint.get((parent_type, rel_field))
-                if rel_endpoint:
-                    try:
-                        related_url = reverse(
-                            rel_endpoint["url_name"],
-                            kwargs={rel_endpoint["pk_name"]: resource["id"]},
-                        )
-                        rel_data.setdefault("links", {})["related"] = related_url
-                    except (NoReverseMatch, ImproperlyConfigured):
-                        pass
-        elif rel_to_endpoint:
-            rel_endpoint = rel_to_endpoint.get((parent_type, rel_field))
-            if rel_endpoint:
-                try:
-                    related_url = reverse(
-                        rel_endpoint["url_name"],
-                        kwargs={rel_endpoint["pk_name"]: resource["id"]},
-                    )
-                    rel_data.setdefault("links", {})["related"] = related_url
-                except (NoReverseMatch, ImproperlyConfigured):
-                    pass
-
-
-def _apply_fields(resource, fields_for_type):
-    if not fields_for_type:
-        return
-    if "attributes" in resource:
-        resource["attributes"] = {
-            k: v for k, v in resource["attributes"].items() if k in fields_for_type
-        }
-        if not resource["attributes"]:
-            del resource["attributes"]
-    if "relationships" in resource:
-        resource["relationships"] = {
-            k: v for k, v in resource["relationships"].items() if k in fields_for_type
-        }
-        if not resource["relationships"]:
-            del resource["relationships"]
-
-
-def _serialize_resource(
-    result, type_to_endpoint, fields, rel_to_endpoint=None, rel_mgmt_to_endpoint=None
-):
-    resource = result.serialize()
-    _add_relationship_links(
-        resource,
-        type_to_endpoint,
-        rel_to_endpoint=rel_to_endpoint,
-        rel_mgmt_to_endpoint=rel_mgmt_to_endpoint,
-    )
-    if fields:
-        _apply_fields(resource, fields.get(result._type))
-    return resource
-
-
-def _one_response(
-    result,
-    url_name,
-    kwargs,
-    type_to_endpoint,
-    fields=None,
-    included=None,
-    rel_to_endpoint=None,
-    rel_mgmt_to_endpoint=None,
-    extra_links=None,
-):
-    resource = _serialize_resource(
-        result,
-        type_to_endpoint,
-        fields,
-        rel_to_endpoint=rel_to_endpoint,
-        rel_mgmt_to_endpoint=rel_mgmt_to_endpoint,
-    )
-    try:
-        self_url = reverse(url_name, kwargs=kwargs)
-        resource.setdefault("links", {})["self"] = self_url
-        links = {"self": self_url}
-    except (NoReverseMatch, ImproperlyConfigured):
-        links = {}
-    if extra_links:
-        links = {**extra_links, **links}
-
-    body: dict = {"data": resource, "links": links, "jsonapi": {"version": "1.0"}}
-    if included:
-        body["included"] = [
-            _serialize_resource(
-                r,
-                type_to_endpoint,
-                fields,
-                rel_to_endpoint=rel_to_endpoint,
-                rel_mgmt_to_endpoint=rel_mgmt_to_endpoint,
-            )
-            for r in included
-        ]
-    return JsonResponse(body, content_type="application/vnd.api+json")
-
-
-def _many_response(
-    result_list,
-    url_name,
-    type_to_endpoint,
-    fields=None,
-    included=None,
-    rel_to_endpoint=None,
-    rel_mgmt_to_endpoint=None,
-    url_kwargs=None,
-    extra_links=None,
-):
-    resources = [
-        _serialize_resource(
-            r,
-            type_to_endpoint,
-            fields,
-            rel_to_endpoint=rel_to_endpoint,
-            rel_mgmt_to_endpoint=rel_mgmt_to_endpoint,
-        )
-        for r in result_list
-    ]
-    try:
-        if url_kwargs:
-            self_url = reverse(url_name, kwargs=url_kwargs)
-        else:
-            self_url = reverse(url_name)
-        links = {"self": self_url}
-    except (NoReverseMatch, ImproperlyConfigured):
-        links = {}
-    if extra_links:
-        links = {**extra_links, **links}
-
-    body: dict = {"data": resources, "links": links, "jsonapi": {"version": "1.0"}}
-    if included:
-        body["included"] = [
-            _serialize_resource(
-                r,
-                type_to_endpoint,
-                fields,
-                rel_to_endpoint=rel_to_endpoint,
-                rel_mgmt_to_endpoint=rel_mgmt_to_endpoint,
-            )
-            for r in included
-        ]
-    return JsonResponse(body, content_type="application/vnd.api+json")
-
-
-def _add_links_to_schema(
-    schema, resource_class, type_to_endpoint, rel_to_endpoint=None, rel_mgmt_to_endpoint=None
-):
+def _add_links_to_schema(schema: dict, resource_class: type[Resource]) -> None:
     rel_props = schema.get("properties", {}).get("relationships", {}).get("properties", {})
-    for rel_field, rel_type_name in resource_class._singular_relationships:
-        endpoint = type_to_endpoint.get(rel_type_name)
-        if endpoint and rel_field in rel_props:
-            rel_props[rel_field]["properties"] = rel_props[rel_field].get("properties", {})
-            links_props = {
-                "related": {"type": "string", "format": "uri"},
-            }
-            if rel_mgmt_to_endpoint:
-                links_props["self"] = {"type": "string", "format": "uri"}
-            rel_props[rel_field]["properties"]["links"] = {
-                "type": "object",
-                "properties": links_props,
-            }
-    for rel_field, rel_type_name in resource_class._plural_relationships:
+    for rel_field, _ in resource_class._singular_relationships:
         if rel_field in rel_props:
             rel_props[rel_field]["properties"] = rel_props[rel_field].get("properties", {})
-            links_props = {}
-            if rel_to_endpoint and rel_to_endpoint.get((resource_class._type, rel_field)):
-                links_props["related"] = {"type": "string", "format": "uri"}
-            if rel_mgmt_to_endpoint and rel_mgmt_to_endpoint.get(
-                (resource_class._type, rel_field)
-            ):
-                links_props["self"] = {"type": "string", "format": "uri"}
-            if links_props:
-                rel_props[rel_field]["properties"]["links"] = {
-                    "type": "object",
-                    "properties": links_props,
-                }
+            rel_props[rel_field]["properties"]["links"] = {
+                "type": "object",
+                "properties": {
+                    "related": {"type": "string", "format": "uri"},
+                    "self": {"type": "string", "format": "uri"},
+                },
+            }
+    for rel_field, _ in resource_class._plural_relationships:
+        if rel_field in rel_props:
+            rel_props[rel_field]["properties"] = rel_props[rel_field].get("properties", {})
+            rel_props[rel_field]["properties"]["links"] = {
+                "type": "object",
+                "properties": {
+                    "related": {"type": "string", "format": "uri"},
+                    "self": {"type": "string", "format": "uri"},
+                },
+            }
 
 
-def _ensure_schema(
-    type_name,
-    resource_class,
-    type_to_endpoint,
-    spec,
-    rel_to_endpoint=None,
-    rel_mgmt_to_endpoint=None,
-):
+def _ensure_schema(spec: dict, type_name: str, resource_class: type[Resource]) -> None:
     schema_name = f"{type_name}_resource"
     if schema_name not in spec["components"]["schemas"]:
         schema_obj = resource_class.jsonschema_read()
-        _add_links_to_schema(
-            schema_obj,
-            resource_class,
-            type_to_endpoint,
-            rel_to_endpoint=rel_to_endpoint,
-            rel_mgmt_to_endpoint=rel_mgmt_to_endpoint,
-        )
+        _add_links_to_schema(schema_obj, resource_class)
         schema_obj["title"] = type_name
         spec["components"]["schemas"][schema_name] = schema_obj
 
 
 def _response_schema(
-    type_name,
-    resource_class,
-    type_to_endpoint,
-    spec,
-    rel_to_endpoint=None,
-    rel_mgmt_to_endpoint=None,
-    has_include=False,
-):
-    _ensure_schema(
-        type_name,
-        resource_class,
-        type_to_endpoint,
-        spec,
-        rel_to_endpoint=rel_to_endpoint,
-        rel_mgmt_to_endpoint=rel_mgmt_to_endpoint,
-    )
+    type_name: str, resource_class: type[Resource], spec: dict, has_include: bool = False
+) -> dict:
+    _ensure_schema(spec, type_name, resource_class)
     links_schema: dict = {
         "type": "object",
-        "properties": {
-            "self": {"type": "string"},
-        },
+        "properties": {"self": {"type": "string"}},
         "additionalProperties": {"type": "string"},
     }
     properties: dict = {
@@ -2121,101 +209,1192 @@ def _response_schema(
     }
 
 
-class _CombinedView:
-    def __init__(self, handlers):
-        self._handlers = handlers
+def _build_relationship_schema(rel_id_type: type, is_plural: bool) -> dict:
+    if is_plural:
+        args = get_args(rel_id_type)
+        effective_id_type = args[0] if args else str
+    else:
+        non_null_args = [a for a in get_args(rel_id_type) if a is not type(None)]
+        effective_id_type = non_null_args[0] if non_null_args else rel_id_type
+    id_schema = _type_to_openapi_schema(effective_id_type)
+    item_schema: dict = {
+        "type": "object",
+        "properties": {"id": id_schema, "type": {"type": "string"}},
+        "required": ["id", "type"],
+    }
+    if is_plural:
+        data_schema: dict = {"type": "array", "items": item_schema}
+    else:
+        data_schema = item_schema
+    return {
+        "type": "object",
+        "properties": {"data": data_schema},
+        "required": ["data"],
+    }
 
-    def __call__(self, request, **kwargs):
-        handler = self._handlers.get(request.method)
-        if handler is None:
-            return JsonResponse(
-                {"errors": [{"status": "405", "title": "Method not allowed"}]},
-                status=405,
+
+def _django_path_to_openapi(django_path: str) -> str:
+    return re.sub(r"<\w+:(\w+)>", r"{\1}", django_path)
+
+
+def _merge_openapi_into(base: dict, overlay: dict) -> None:
+    for key, val in overlay.items():
+        if key in base:
+            if isinstance(base[key], dict) and isinstance(val, dict):
+                _merge_openapi_into(base[key], val)
+            elif isinstance(base[key], list) and isinstance(val, list):
+                base[key].extend(val)
+            else:
+                base[key] = val
+        else:
+            base[key] = val
+
+
+@dataclass
+class Endpoint:
+    type_name: str
+    handler: Callable[..., Any]
+    errors: Sequence[type[DjsonApiExceptionSingle]] | None = None
+
+    METHOD = ""
+    URL_NAME_TEMPLATE = ""
+    SUCCESS_STATUS: ClassVar[int] = 200
+
+    def __post_init__(self):
+        pass
+
+    @property
+    def url_name(self) -> str:
+        return self.URL_NAME_TEMPLATE.format(type_name=self.type_name)
+
+    @functools.cached_property
+    def url(self):
+        return f"{self.type_name}"
+
+    @functools.cached_property
+    def signature(self) -> inspect.Signature:
+        return inspect.signature(self.handler)
+
+    @functools.cached_property
+    def parameters(self) -> list[inspect.Parameter]:
+        return list(self.signature.parameters.values())
+
+    @functools.cached_property
+    def return_annotation(self):
+        return self.signature.return_annotation
+
+    @functools.cached_property
+    def smart_parameters(self) -> list[inspect.Parameter]:
+        return self.parameters[1:]
+
+    @functools.cached_property
+    def expected_extra(self) -> list[inspect.Parameter]:
+        return [
+            parameter
+            for parameter in self.smart_parameters
+            if parameter.name.startswith("extra__")
+        ]
+
+    @functools.cached_property
+    def return_resource_type(self):
+        """Infer Resource subclass from handler return annotation.
+
+        Handles bare Resource, Response[Resource], Response[list[Resource]].
+        Returns None if no Resource type found.
+        """
+
+        if isinstance(self.return_annotation, type) and issubclass(
+            self.return_annotation, Resource
+        ):
+            return self.return_annotation
+        origin = get_origin(self.return_annotation)
+        if isinstance(origin, type) and issubclass(origin, Response):
+            args = get_args(self.return_annotation)
+            if not args:
+                return None
+            inner = args[0]
+            if isinstance(inner, type) and issubclass(inner, Resource):
+                return inner
+            iorigin = get_origin(inner)
+            if isinstance(iorigin, type) and issubclass(iorigin, list):
+                iargs = get_args(inner)
+                if iargs and isinstance(iargs[0], type) and issubclass(iargs[0], Resource):
+                    return iargs[0]
+            return None
+        if isinstance(origin, type) and issubclass(origin, list):
+            iargs = get_args(self.return_annotation)
+            if iargs and isinstance(iargs[0], type) and issubclass(iargs[0], Resource):
+                return iargs[0]
+        return None
+
+    async def view(self, request: HttpRequest, **url_kwargs: Any) -> Any:
+        remaining_params = request.GET.dict()
+        kwargs, errors = self._get_kwargs(request, url_kwargs, remaining_params)
+        if remaining_params:
+            errors.append(
+                BadRequest(f"Unknown query parameters: {', '.join(sorted(remaining_params))}")
             )
-        return handler(request, **kwargs)
+        for param in self.smart_parameters:
+            if param.default is inspect.Parameter.empty and param.name not in kwargs:
+                errors.append(InternalServerError(f"Missing required parameter: {param.name}"))
+        if errors:
+            raise DjsonApiExceptionMulti(*errors)
+        if asyncio.iscoroutinefunction(self.handler):
+            result = await self.handler(request, **kwargs)
+        else:
+            result = self.handler(request, **kwargs)
+        if not isinstance(result, Response):
+            result = Response(data=result)
+        return self._postprocess(result, request)
+
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
+        return {}, []
+
+    def _openapi_operation(self) -> dict:
+        return {}
+
+    def _postprocess(self, response: Response, request: HttpRequest) -> Any:
+        if self.SUCCESS_STATUS == 204:
+            return HttpResponse(status=204)
+        response.status = self.SUCCESS_STATUS
+        return response
 
 
-def _create_response(
-    result,
-    type_name,
-    type_to_endpoint,
-    fields=None,
-    included=None,
-    rel_to_endpoint=None,
-    rel_mgmt_to_endpoint=None,
-    extra_links=None,
-):
-    if result is None:
-        body = {"jsonapi": {"version": "1.0"}}
-        if extra_links:
-            body["links"] = extra_links
-        return JsonResponse(body, status=202)
+class ExpectsIdMixin(Endpoint):
+    parameters: ClassVar[list[inspect.Parameter]]
+    type_name: ClassVar[str]
 
-    resource = _serialize_resource(
-        result,
-        type_to_endpoint,
-        fields,
-        rel_to_endpoint=rel_to_endpoint,
-        rel_mgmt_to_endpoint=rel_mgmt_to_endpoint,
-    )
+    @functools.cached_property
+    def pk_name(self):
+        return self.parameters[1].name
 
-    endpoint = type_to_endpoint.get(type_name)
-    location = None
-    if endpoint:
-        pk_value = getattr(result, "id", None)
-        if pk_value is not None:
+    @functools.cached_property
+    def pk_type(self):
+        param = self.parameters[1]
+        return param.annotation if param.annotation != inspect.Parameter.empty else str
+
+    @functools.cached_property
+    def url(self):
+        path_type = {UUID: "uuid", int: "int", str: "str"}[self.pk_type]
+        return f"{self.type_name}/<{path_type}:{self.pk_name}>"
+
+    @functools.cached_property
+    def smart_parameters(self) -> list[inspect.Parameter]:
+        return self.parameters[2:]
+
+    def _openapi_operation(self) -> dict:
+        result = super()._openapi_operation()
+        try:
+            pk_name = self.pk_name
+            pk_type = self.pk_type
+        except IndexError:
+            return result
+        _merge_openapi_into(
+            result,
+            {
+                "parameters": [
+                    {
+                        "name": pk_name,
+                        "in": "path",
+                        "required": True,
+                        "schema": _PYTHON_TO_OPENAPI.get(pk_type, {"type": "string"}),
+                    }
+                ]
+            },
+        )
+        return result
+
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
+        kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params)
+        if self.pk_name not in url_kwargs:
+            return kwargs, errors
+        raw = url_kwargs[self.pk_name]
+        try:
+            pk_value = self.pk_type(raw)
+        except Exception:
+            raise NotFound("The URL does not exist")
+        kwargs[self.pk_name] = pk_value
+        return kwargs, errors
+
+
+@dataclass(kw_only=True)
+class ExpectsPayloadMixin(Endpoint):
+    def __post_init__(self):
+        super().__post_init__()
+        if not (
+            isinstance(self.payload_parameter.annotation, type)
+            and issubclass(self.payload_parameter.annotation, Resource)
+        ):
+            raise ValueError(
+                f"First smart parameter '{self.payload_parameter.name}' must be a Resource subclass, "
+                f"got {self.payload_parameter.annotation}"
+            )
+
+    @functools.cached_property
+    def payload_parameter(self) -> inspect.Parameter:
+        return self.smart_parameters[0]
+
+    def _get_payload_schema_fn(self, resource_class: type[Resource]):
+        raise NotImplementedError
+
+    def _get_payload_fields(self, resource_class: type[Resource]) -> list[str] | None:
+        raise NotImplementedError
+
+    def _openapi_operation(self) -> dict:
+        result = super()._openapi_operation()
+        resource_class = self.payload_parameter.annotation
+        schema_fn = self._get_payload_schema_fn(resource_class)
+        _merge_openapi_into(
+            result,
+            {
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/vnd.api+json": {
+                            "schema": schema_fn() if schema_fn else {"type": "object"}
+                        }
+                    },
+                }
+            },
+        )
+        return result
+
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
+        kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params)
+        payload, parse_errors = self._parse_body(request)
+        if parse_errors:
+            errors.extend(parse_errors)
+        else:
+            kwargs[self.payload_parameter.name] = payload
+        return kwargs, errors
+
+    def _parse_body(
+        self, request: HttpRequest
+    ) -> tuple[Any | None, list[DjsonApiExceptionSingle]]:
+        try:
+            body = json.loads(request.body)
+        except json.JSONDecodeError as e:
+            return None, [BadRequest(f"Invalid JSON: {e}")]
+
+        resource_class = self.payload_parameter.annotation
+        if not (isinstance(resource_class, type) and issubclass(resource_class, Resource)):
+            return None, [BadRequest("Could not determine resource type")]
+
+        schema_fn = self._get_payload_schema_fn(resource_class)
+        if schema_fn:
             try:
-                location = reverse(
-                    endpoint["url_name"],
-                    kwargs={endpoint["pk_name"]: str(pk_value)},
+                jsonschema.validate(body.get("data", body), schema_fn())
+            except jsonschema.ValidationError as e:
+                return None, [BadRequest(str(e))]
+
+        fields = self._get_payload_fields(resource_class)
+        payload = resource_class._from_jsonapi_payload(body, fields=fields)
+        return payload, []
+
+
+@dataclass(kw_only=True)
+class ReturnsDataMixin(ExpectsIdMixin):
+    return_annotation: ClassVar
+    smart_parameters: ClassVar[Sequence[inspect.Parameter]]
+    return_resource_type: ClassVar[type[Resource] | None]
+    expected_extra: ClassVar[list[inspect.Parameter]]
+
+    sparse: bool = True
+    include_types: Sequence[type[Resource]] = field(default_factory=list)
+
+    def __post_init__(self):
+        super().__post_init__()
+        if forbidden_includes := self.expected_includes - self.allowed_includes:
+            raise ValueError(f"Invalid include types: {forbidden_includes}")
+        if forbidden_sparse_types := self.expected_sparse - self.allowed_sparse.keys():
+            raise ValueError(f"Invalid sparse types: {forbidden_sparse_types}")
+
+    @functools.cached_property
+    def expected_sparse(self) -> set[str]:
+        """Sparse types that the handler function expects
+
+        >>> @api.get_many("articles", include_types=[User, Category])
+        ... def get_articles(
+        ...     request: HttpRequest,
+        ...     fields__articles: Sequence[str] | None = None,
+        ...     fields__users: Sequence[str] | None = None,
+        ...     fields__categories: Sequence[str] | None = None,
+        ... ) -> Response[list[ArticleResource]: ...
+        ...
+        >>> get_articles.expected_sparse
+        <<< {'articles', 'users', 'categories'}
+        """
+
+        return {
+            parameter.name[len("fields__") :]
+            for parameter in self.smart_parameters
+            if parameter.name.startswith("fields__")
+        }
+
+    @functools.cached_property
+    def expected_includes(self) -> set[str]:
+        """Included types that the handler function expects
+
+        >>> @api.get_many("articles", include_types=[User, Category])
+        ... def get_articles(
+        ...     request: HttpRequest,
+        ...     include__articles: bool = False,
+        ...     include__author: bool = False,
+        ...     include__categories: bool = False,
+        ... ) -> Response[list[ArticleResource]]: ...
+
+        >>> get_articles.expected_includes
+        <<< {"articles", "author", "categories"}
+        """
+
+        return {
+            parameter.name[len("include__") :]
+            for parameter in self.smart_parameters
+            if parameter.name.startswith("include__")
+        }
+
+    @functools.cached_property
+    def allowed_sparse(self) -> dict[str, set[str]]:
+        """Allowed sparse types and fields based on return and include types
+
+        >>> @api.get_many("articles", include_types=[User, Category])
+        ... def get_articles(request: HttpRequest) -> Response[list[ArticleResource]]: ...
+
+        >>> get_articles.allowed_sparse
+        <<< {'articles': {'title', 'content', ...},
+        ...  'users': {'username', ...},
+        ...  'categories': {'name', ...}}
+        """
+
+        if not self.sparse:
+            return {}
+
+        result = {}
+
+        if self.return_resource_type is not None:
+            result[self.return_resource_type._type] = {
+                *self.return_resource_type._attributes,
+                *[_type for _, _type in self.return_resource_type._singular_relationships],
+                *[_type for _, _type in self.return_resource_type._plural_relationships],
+            }
+
+        for include_type in self.include_types:
+            result[include_type._type] = {
+                *include_type._attributes,
+                *[_type for _, _type in include_type._singular_relationships],
+                *[_type for _, _type in include_type._plural_relationships],
+            }
+
+        return result
+
+    @functools.cached_property
+    def allowed_includes(self) -> set[str]:
+        """Allowed include types based on return and include types
+
+        >>> @api.get_many("articles", include_types=[User, Category])
+        ... def get_articles(request: HttpRequest) -> Response[list[ArticleResource]]: ...
+
+        >>> get_articles.allowed_sparse
+        <<< {'articles', 'author', 'categories'}  # 'author', not 'users'
+        """
+
+        if self.return_resource_type is None:
+            return set()
+        return {
+            *[rel for rel, _ in self.return_resource_type._singular_relationships],
+            *[rel for rel, _ in self.return_resource_type._plural_relationships],
+        }
+
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
+        kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params or {})
+
+        request_includes = {r for r in (remaining_params or {}).pop("include", "").split(",") if r}
+        if forbidden_includes := request_includes - self.expected_includes:
+            errors.append(BadRequest(f"Invalid include types: {forbidden_includes}"))
+        for inc in request_includes:
+            kwargs[f"include__{inc}"] = True
+
+        request_sparse: dict[str, set[str]] = {}
+        for key in list(remaining_params or {}):
+            if m := re.search(r"^fields\[(\w+)\]$", key):
+                request_sparse[m.group(1)] = {
+                    f.strip() for f in (remaining_params or {}).pop(key).split(",") if f.strip()
+                }
+        if forbidden_sparse_types := request_sparse.keys() - self.allowed_sparse.keys():
+            errors.append(BadRequest(f"Invalid fields types: {forbidden_sparse_types}"))
+        for sparse_type, fields in request_sparse.items():
+            if sparse_type in self.expected_sparse:
+                kwargs[f"fields__{sparse_type}"] = fields
+
+        expected_extra_names = {p.name[len("extra__") :] for p in self.expected_extra}
+        for param in self.expected_extra:
+            extra_name = param.name[len("extra__") :]
+            raw = (remaining_params or {}).pop(extra_name, None)
+            if raw is not None:
+                tp = param.annotation if param.annotation != inspect.Parameter.empty else str
+                try:
+                    kwargs[param.name] = tp(raw)
+                except ValueError as e:
+                    errors.append(BadRequest(str(e)))
+            elif param.default is inspect.Parameter.empty:
+                errors.append(BadRequest(f"Missing required extra parameter: {extra_name}"))
+            else:
+                kwargs[param.name] = param.default
+
+        return kwargs, errors
+
+    def _openapi_operation(self) -> dict:
+        result = super()._openapi_operation()
+
+        query_params = _handler_query_params(self.handler)
+        if query_params:
+            _merge_openapi_into(result, {"parameters": query_params})
+
+        if self.sparse:
+            sparse_params = []
+            for type_name in sorted(self.allowed_sparse):
+                field_names = _sparse_field_names(
+                    next(
+                        (
+                            t
+                            for t in [self.return_resource_type, *self.include_types]
+                            if t is not None and t._type == type_name
+                        ),
+                        None,
+                    )
                 )
+                desc = (
+                    f"Comma-separated list of fields. Available fields: {', '.join(field_names)}."
+                    if isinstance(field_names, list) and field_names
+                    else "Comma-separated list of fields."
+                )
+                sparse_params.append(
+                    {
+                        "name": f"fields[{type_name}]",
+                        "in": "query",
+                        "required": False,
+                        "schema": {"type": "string"},
+                        "description": desc,
+                    }
+                )
+            if sparse_params:
+                _merge_openapi_into(result, {"parameters": sparse_params})
+
+        if self.return_resource_type is not None:
+            has_include = any(p.name.startswith("include__") for p in self.smart_parameters)
+            spec_placeholder: dict = {"components": {"schemas": {}}}
+            response_schema = _response_schema(
+                self.return_resource_type._type,
+                self.return_resource_type,
+                spec_placeholder,
+                has_include=has_include,
+            )
+            fragment: dict = {
+                "responses": {
+                    str(self.SUCCESS_STATUS): {
+                        "description": "OK",
+                        "content": {"application/vnd.api+json": {"schema": response_schema}},
+                    }
+                }
+            }
+            if spec_placeholder["components"]["schemas"]:
+                fragment["components"] = spec_placeholder["components"]
+            _merge_openapi_into(result, fragment)
+
+        return result
+
+    def _postprocess(self, response: Response, request: HttpRequest) -> dict[str, Any]:
+        data = response.serialize(request)
+        data.setdefault("links", {})["self"] = request.get_full_path()
+        return data
+
+
+@dataclass(kw_only=True)
+class ExpectsRelationshipIdsMixin(Endpoint):
+    def __post_init__(self):
+        super().__post_init__()
+
+    @functools.cached_property
+    def ids_parameter(self) -> inspect.Parameter:
+        return self.smart_parameters[0]
+
+    def _openapi_operation(self) -> dict:
+        result = super()._openapi_operation()
+        annotation = self.ids_parameter.annotation
+        plural = _annotation_is_list(annotation)
+        schema = _build_relationship_schema(annotation, plural)
+        _merge_openapi_into(
+            result,
+            {
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/vnd.api+json": {"schema": schema}},
+                }
+            },
+        )
+        return result
+
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
+        kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params)
+
+        try:
+            body = json.loads(request.body)
+        except json.JSONDecodeError as e:
+            return kwargs, errors + [BadRequest(f"Invalid JSON: {e}")]
+
+        raw = body.get("data")
+        if raw is None:
+            return kwargs, errors + [BadRequest("Missing 'data' in request body")]
+
+        annotation = self.ids_parameter.annotation
+        plural = _annotation_is_list(annotation)
+
+        if plural:
+            if not isinstance(raw, list):
+                return kwargs, errors + [
+                    BadRequest("Expected array of resource identifier objects")
+                ]
+            inner_type = get_args(annotation)[0] if get_args(annotation) else str
+            try:
+                kwargs[self.ids_parameter.name] = [inner_type(item["id"]) for item in raw]
+            except (KeyError, TypeError, ValueError) as e:
+                return kwargs, errors + [BadRequest(f"Invalid resource identifier: {e}")]
+        else:
+            item_type = annotation if annotation is not inspect.Parameter.empty else str
+            if not isinstance(raw, dict):
+                return kwargs, errors + [BadRequest("Expected single resource identifier object")]
+            try:
+                kwargs[self.ids_parameter.name] = item_type(raw["id"])
+            except (KeyError, TypeError, ValueError) as e:
+                return kwargs, errors + [BadRequest(f"Invalid resource identifier: {e}")]
+
+        return kwargs, errors
+
+
+@dataclass(kw_only=True)
+class ExpectsRelationshipMixin(ExpectsIdMixin):
+    relationship_name: str
+
+    URL_NAME_TEMPLATE: ClassVar[str]
+
+    @property
+    def url_name(self):
+        return self.URL_NAME_TEMPLATE.format(
+            type_name=self.type_name, relationship_name=self.relationship_name
+        )
+
+    @functools.cached_property
+    def url(self):
+        path_type = {UUID: "uuid", int: "int", str: "str"}[self.pk_type]
+        return (
+            f"{self.type_name}/<{path_type}:{self.pk_name}>/relationship/{self.relationship_name}"
+        )
+
+
+@dataclass
+class GetOneEndpoint(ReturnsDataMixin, ExpectsIdMixin, Endpoint):
+    METHOD = "GET"
+    URL_NAME_TEMPLATE = "{type_name}__item"
+
+
+@dataclass
+class EditOneEndpoint(ReturnsDataMixin, ExpectsIdMixin, ExpectsPayloadMixin, Endpoint):
+    METHOD = "PATCH"
+    URL_NAME_TEMPLATE = "{type_name}__item"
+
+    def _get_payload_schema_fn(self, resource_class: type[Resource]):
+        return resource_class.jsonschema_edit
+
+    def _get_payload_fields(self, resource_class: type[Resource]) -> list[str] | None:
+        return resource_class._edit_fields
+
+
+@dataclass
+class DeleteOneEndpoint(ExpectsIdMixin, Endpoint):
+    METHOD = "DELETE"
+    URL_NAME_TEMPLATE = "{type_name}__item"
+    SUCCESS_STATUS: ClassVar[int] = 204
+
+
+@dataclass
+class GetManyEndpoint(ReturnsDataMixin, Endpoint):
+    METHOD = "GET"
+    URL_NAME_TEMPLATE = "{type_name}__collection"
+
+    @functools.cached_property
+    def smart_parameters(self) -> list[inspect.Parameter]:
+        return self.parameters[1:]
+
+    @functools.cached_property
+    def url(self):
+        return f"{self.type_name}"
+
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
+        kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params or {})
+        rp = remaining_params or {}
+
+        for param in self.smart_parameters:
+            if param.name in ("sort", "page"):
+                raw = rp.pop(param.name, None)
+                if raw is not None:
+                    if param.name == "page":
+                        try:
+                            kwargs[param.name] = int(raw)
+                        except ValueError:
+                            errors.append(BadRequest("page must be an integer"))
+                    else:
+                        if _annotation_is_list(param.annotation):
+                            kwargs[param.name] = [s.strip() for s in raw.split(",") if s.strip()]
+                        else:
+                            kwargs[param.name] = raw
+                elif param.default is inspect.Parameter.empty:
+                    errors.append(BadRequest(f"Missing required parameter: {param.name}"))
+                else:
+                    kwargs[param.name] = param.default
+            elif param.name.startswith("filter__"):
+                filter_key = param.name[len("filter__") :]
+                raw = rp.pop(filter_key, None)
+                if raw is not None:
+                    tp = param.annotation if param.annotation != inspect.Parameter.empty else str
+                    try:
+                        kwargs[param.name] = tp(raw)
+                    except ValueError as e:
+                        errors.append(BadRequest(str(e)))
+                elif param.default is inspect.Parameter.empty:
+                    errors.append(BadRequest(f"Missing required parameter: {param.name}"))
+                else:
+                    kwargs[param.name] = param.default
+
+        return kwargs, errors
+
+
+@dataclass
+class CreateOneEndpoint(ReturnsDataMixin, ExpectsPayloadMixin, Endpoint):
+    METHOD = "POST"
+    URL_NAME_TEMPLATE = "{type_name}__collection"
+    SUCCESS_STATUS: ClassVar[int] = 201
+
+    @functools.cached_property
+    def smart_parameters(self) -> list[inspect.Parameter]:
+        return self.parameters[1:]
+
+    @functools.cached_property
+    def url(self):
+        return f"{self.type_name}"
+
+    def _get_payload_schema_fn(self, resource_class: type[Resource]):
+        return resource_class.jsonschema_create
+
+    def _get_payload_fields(self, resource_class: type[Resource]) -> list[str] | None:
+        return resource_class._create_fields
+
+    def _postprocess(self, response: Response, request: HttpRequest) -> Any:
+        if response.data is None:
+            return JsonResponse(
+                {"jsonapi": {"version": "1.0"}},
+                status=202,
+                content_type="application/vnd.api+json",
+            )
+        return super()._postprocess(response, request)
+
+
+@dataclass
+class GetRelationshipEndpoint(ReturnsDataMixin, ExpectsRelationshipMixin, Endpoint):
+    METHOD = "GET"
+    URL_NAME_TEMPLATE = "{type_name}__{relationship_name}__related"
+
+    @functools.cached_property
+    def url(self):
+        path_type = {UUID: "uuid", int: "int", str: "str"}[self.pk_type]
+        return f"{self.type_name}/<{path_type}:{self.pk_name}>/{self.relationship_name}"
+
+
+@dataclass
+class EditRelationshipEndpoint(ExpectsRelationshipMixin, ExpectsRelationshipIdsMixin, Endpoint):
+    METHOD = "PATCH"
+    URL_NAME_TEMPLATE = "{type_name}__{relationship_name}__relationship"
+    SUCCESS_STATUS: ClassVar[int] = 204
+
+
+@dataclass
+class ResetRelationshipEndpoint(ExpectsRelationshipMixin, ExpectsRelationshipIdsMixin, Endpoint):
+    METHOD = "PATCH"
+    URL_NAME_TEMPLATE = "{type_name}__{relationship_name}__relationship"
+    SUCCESS_STATUS: ClassVar[int] = 204
+
+
+@dataclass
+class AddToRelationshipEndpoint(ExpectsRelationshipMixin, ExpectsRelationshipIdsMixin, Endpoint):
+    METHOD = "POST"
+    URL_NAME_TEMPLATE = "{type_name}__{relationship_name}__relationship"
+    SUCCESS_STATUS: ClassVar[int] = 204
+
+
+@dataclass
+class RemoveFromRelationshipEndpoint(
+    ExpectsRelationshipMixin, ExpectsRelationshipIdsMixin, Endpoint
+):
+    METHOD = "DELETE"
+    URL_NAME_TEMPLATE = "{type_name}__{relationship_name}__relationship"
+    SUCCESS_STATUS: ClassVar[int] = 204
+
+
+@dataclass
+class DjsonApi:
+    registry: list[Endpoint] = field(default_factory=list)
+
+    def get_one(
+        self,
+        type_name: str,
+        errors: Sequence[type[DjsonApiExceptionSingle]] | None = None,
+        sparse: bool = True,
+        include_types: Sequence[type[Resource]] | None = None,
+    ) -> Callable[[Callable[..., Any]], Endpoint]:
+        if include_types is None:
+            include_types = []
+
+        def decorator(handler: Callable[..., Any]) -> Endpoint:
+            endpoint = GetOneEndpoint(
+                type_name, handler, errors, sparse=sparse, include_types=include_types
+            )
+            self.registry.append(endpoint)
+            return endpoint
+
+        return decorator
+
+    def get_many(
+        self,
+        type_name: str,
+        errors: Sequence[type[DjsonApiExceptionSingle]] | None = None,
+        sparse: bool = True,
+        include_types: Sequence[type[Resource]] | None = None,
+    ) -> Callable[[Callable[..., Any]], Endpoint]:
+        if include_types is None:
+            include_types = []
+
+        def decorator(handler: Callable[..., Any]) -> Endpoint:
+            endpoint = GetManyEndpoint(
+                type_name, handler, errors, sparse=sparse, include_types=include_types
+            )
+            self.registry.append(endpoint)
+            return endpoint
+
+        return decorator
+
+    def create_one(
+        self,
+        type_name: str,
+        errors: Sequence[type[DjsonApiExceptionSingle]] | None = None,
+        sparse: bool = True,
+        include_types: Sequence[type[Resource]] | None = None,
+    ) -> Callable[[Callable[..., Any]], Endpoint]:
+        if include_types is None:
+            include_types = []
+
+        def decorator(handler: Callable[..., Any]) -> Endpoint:
+            endpoint = CreateOneEndpoint(
+                type_name, handler, errors, sparse=sparse, include_types=include_types
+            )
+            self.registry.append(endpoint)
+            return endpoint
+
+        return decorator
+
+    def edit_one(
+        self,
+        type_name: str,
+        errors: Sequence[type[DjsonApiExceptionSingle]] | None = None,
+        sparse: bool = True,
+        include_types: Sequence[type[Resource]] | None = None,
+    ) -> Callable[[Callable[..., Any]], Endpoint]:
+        if include_types is None:
+            include_types = []
+
+        def decorator(handler: Callable[..., Any]) -> Endpoint:
+            endpoint = EditOneEndpoint(
+                type_name, handler, errors, sparse=sparse, include_types=include_types
+            )
+            self.registry.append(endpoint)
+            return endpoint
+
+        return decorator
+
+    def delete_one(
+        self,
+        type_name: str,
+        errors: Sequence[type[DjsonApiExceptionSingle]] | None = None,
+    ) -> Callable[[Callable[..., Any]], Endpoint]:
+        def decorator(handler: Callable[..., Any]) -> Endpoint:
+            endpoint = DeleteOneEndpoint(type_name, handler, errors)
+            self.registry.append(endpoint)
+            return endpoint
+
+        return decorator
+
+    def get_relationship(
+        self,
+        type_name: str,
+        relationship_name: str,
+        errors: Sequence[type[DjsonApiExceptionSingle]] | None = None,
+        sparse: bool = True,
+        include_types: Sequence[type[Resource]] | None = None,
+    ) -> Callable[[Callable[..., Any]], Endpoint]:
+        if include_types is None:
+            include_types = []
+
+        def decorator(handler: Callable[..., Any]) -> Endpoint:
+            endpoint = GetRelationshipEndpoint(
+                type_name,
+                handler,
+                errors,
+                relationship_name=relationship_name,
+                sparse=sparse,
+                include_types=include_types,
+            )
+            self.registry.append(endpoint)
+            return endpoint
+
+        return decorator
+
+    def edit_relationship(
+        self,
+        type_name: str,
+        relationship_name: str,
+        errors: Sequence[type[DjsonApiExceptionSingle]] | None = None,
+    ) -> Callable[[Callable[..., Any]], Endpoint]:
+        def decorator(handler: Callable[..., Any]) -> Endpoint:
+            endpoint = EditRelationshipEndpoint(
+                type_name, handler, errors, relationship_name=relationship_name
+            )
+            self.registry.append(endpoint)
+            return endpoint
+
+        return decorator
+
+    def reset_relationship(
+        self,
+        type_name: str,
+        relationship_name: str,
+        errors: Sequence[type[DjsonApiExceptionSingle]] | None = None,
+    ) -> Callable[[Callable[..., Any]], Endpoint]:
+        def decorator(handler: Callable[..., Any]) -> Endpoint:
+            endpoint = ResetRelationshipEndpoint(
+                type_name, handler, errors, relationship_name=relationship_name
+            )
+            self.registry.append(endpoint)
+            return endpoint
+
+        return decorator
+
+    def add_to_relationship(
+        self,
+        type_name: str,
+        relationship_name: str,
+        errors: Sequence[type[DjsonApiExceptionSingle]] | None = None,
+    ) -> Callable[[Callable[..., Any]], Endpoint]:
+        def decorator(handler: Callable[..., Any]) -> Endpoint:
+            endpoint = AddToRelationshipEndpoint(
+                type_name, handler, errors, relationship_name=relationship_name
+            )
+            self.registry.append(endpoint)
+            return endpoint
+
+        return decorator
+
+    def remove_from_relationship(
+        self,
+        type_name: str,
+        relationship_name: str,
+        errors: Sequence[type[DjsonApiExceptionSingle]] | None = None,
+    ) -> Callable[[Callable[..., Any]], Endpoint]:
+        def decorator(handler: Callable[..., Any]) -> Endpoint:
+            endpoint = RemoveFromRelationshipEndpoint(
+                type_name, handler, errors, relationship_name=relationship_name
+            )
+            self.registry.append(endpoint)
+            return endpoint
+
+        return decorator
+
+    @property
+    def urls(self) -> list[URLPattern]:
+        by_path: dict[str, list] = {}
+        for endpoint in self.registry:
+            by_path.setdefault(endpoint.url, []).append(endpoint)
+        result = [
+            django_path(path, self.combine_views(endpoints), name=endpoints[0].url_name)
+            for path, endpoints in by_path.items()
+        ]
+        result.append(django_path("openapi.json", self._openapi_view, name="openapi"))
+        result.append(django_path("docs/", self._docs_view, name="docs"))
+        return result
+
+    def _openapi_view(self, request: HttpRequest) -> JsonResponse:
+        return JsonResponse(self._build_openapi_spec())
+
+    def _docs_view(self, request: HttpRequest) -> HttpResponse:
+        try:
+            openapi_url = reverse("openapi")
+        except (NoReverseMatch, ImproperlyConfigured):
+            openapi_url = "/openapi.json"
+        html = f"""<!DOCTYPE html>
+            <html>
+            <head>
+              <title>API Docs</title>
+              <meta charset="utf-8"/>
+              <meta name="viewport" content="width=device-width, initial-scale=1">
+            </head>
+            <body>
+              <redoc spec-url='{openapi_url}'></redoc>
+              <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+            </body>
+            </html>
+        """
+        return HttpResponse(html.encode(), content_type="text/html")
+
+    def _build_openapi_spec(self) -> dict:
+        spec: dict = {
+            "openapi": "3.0.3",
+            "info": {"title": "API", "version": "1.0.0"},
+            "paths": {},
+            "components": {"schemas": {}},
+        }
+        tags_set: set[str] = set()
+
+        for endpoint in self.registry:
+            type_name = endpoint.type_name
+            tags_set.add(type_name)
+
+            raw_name = endpoint.handler.__name__.replace("_", " ")
+            summary = raw_name[0].upper() + raw_name[1:] if raw_name else raw_name
+
+            op = endpoint._openapi_operation()
+            op["tags"] = [type_name]
+            op["summary"] = summary
+            method = endpoint.METHOD.lower()
+
+            if "responses" not in op:
+                op["responses"] = {
+                    str(endpoint.SUCCESS_STATUS): {
+                        "description": "No Content" if endpoint.SUCCESS_STATUS == 204 else "OK"
+                    }
+                }
+
+            if endpoint.errors:
+                for ex_class in endpoint.errors:
+                    status = str(getattr(ex_class, "STATUS", 400))
+                    title = _class_name_to_title(ex_class.__name__)
+                    op["responses"][status] = {
+                        "description": title,
+                        "content": {
+                            "application/vnd.api+json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "errors": {"type": "array", "items": {"type": "object"}}
+                                    },
+                                }
+                            }
+                        },
+                    }
+
+            path_str = _django_path_to_openapi(f"/{endpoint.url}")
+            spec["paths"].setdefault(path_str, {})[method] = op
+
+            for schema_name, schema_obj in op.get("components", {}).get("schemas", {}).items():
+                spec["components"]["schemas"].setdefault(schema_name, schema_obj)
+
+        endpoint_tags = sorted(tags_set)
+        spec["tags"] = [{"name": t} for t in endpoint_tags]
+
+        schema_names = list(spec["components"]["schemas"].keys())
+        if schema_names:
+            schema_tags = []
+            for schema_name in schema_names:
+                type_name = schema_name.removesuffix("_resource")
+                tag_name = f"{type_name}_schema"
+                schema_tags.append(tag_name)
+                spec["tags"].append(
+                    {
+                        "name": tag_name,
+                        "x-displayName": type_name,
+                        "description": f'<SchemaDefinition schemaRef="#/components/schemas/{schema_name}" />',
+                    }
+                )
+            spec["x-tagGroups"] = [
+                {"name": "Endpoints", "tags": endpoint_tags},
+                {"name": "Schemas", "tags": schema_tags},
+            ]
+        else:
+            spec["x-tagGroups"] = [
+                {"name": "Endpoints", "tags": endpoint_tags},
+            ]
+        return spec
+
+    def combine_views(self, endpoints: list[Endpoint]) -> Callable[..., Any]:
+        by_method: dict[str, Endpoint] = {endpoint.METHOD: endpoint for endpoint in endpoints}
+
+        @csrf_exempt
+        async def view(request: HttpRequest, *args, **kwargs):
+            try:
+                if request.method not in by_method:
+                    raise MethodNotAllowed(
+                        f"Method {request.method} not allowed for this endpoint, "
+                        f"allowed methods: {', '.join(by_method.keys())}"
+                    )
+                endpoint = by_method[request.method]
+                result = await endpoint.view(request, *args, **kwargs)
+            except DjsonApiExceptionSingle as exc:
+                return JsonResponse(
+                    {"errors": exc.render()},
+                    status=exc.status,
+                    content_type="application/vnd.api+json",
+                )
+            except Exception:
+                logging.exception("Unhandled exception in djsonapi endpoint")
+                exc = InternalServerError()
+                return JsonResponse(
+                    {"errors": exc.render()},
+                    status=exc.status,
+                    content_type="application/vnd.api+json",
+                )
+
+            if isinstance(result, dict):
+                result.setdefault("links", {})["self"] = request.get_full_path()
+                if isinstance(result.get("data"), list):
+                    for item in result["data"]:
+                        self._fill_resource_links(item)
+                        self._filter_out_sparse(item, request)
+                else:
+                    self._fill_resource_links(result["data"])
+                    self._filter_out_sparse(result["data"], request)
+                for item in result.get("included", []):
+                    self._fill_resource_links(item)
+                    self._filter_out_sparse(item, request)
+                django_response = JsonResponse(
+                    result, status=endpoint.SUCCESS_STATUS, content_type="application/vnd.api+json"
+                )
+                if endpoint.SUCCESS_STATUS == 201 and isinstance(result.get("data"), dict):
+                    resource_id = result["data"].get("id")
+                    if resource_id is not None:
+                        try:
+                            django_response["Location"] = reverse(
+                                f"{endpoint.type_name}__item", args=(str(resource_id),)
+                            )
+                        except (NoReverseMatch, ImproperlyConfigured):
+                            pass
+                return django_response
+
+            if isinstance(result, Response):
+                data = result.serialize(request)
+                return JsonResponse(
+                    data,
+                    status=result.status or endpoint.SUCCESS_STATUS,
+                    content_type="application/vnd.api+json",
+                )
+
+            return result
+
+        return view
+
+    def _fill_resource_links(self, resource: dict[str, Any]) -> None:
+        _type = resource.get("type")
+        _id = resource.get("id")
+
+        try:
+            self_link = reverse(f"{_type}__item", args=(_id,))
+        except (NoReverseMatch, ImproperlyConfigured):
+            pass
+        else:
+            resource.setdefault("links", {})["self"] = self_link
+
+        for relationship_name, relationship in resource.get("relationships", {}).items():
+            related_link = None
+            try:
+                relationship_type = relationship["data"]["type"]
+                relationship_id = relationship["data"]["id"]
+            except Exception:
+                pass
+            else:
+                try:
+                    related_link = reverse(f"{relationship_type}__item", args=(relationship_id,))
+                except (NoReverseMatch, ImproperlyConfigured):
+                    pass
+            try:
+                related_link = reverse(f"{_type}__{relationship_name}__related", args=(_id,))
+            except (NoReverseMatch, ImproperlyConfigured):
+                pass
+            try:
+                related_link = reverse(f"{_type}__{relationship_name}__related", args=(_id,))
             except (NoReverseMatch, ImproperlyConfigured):
                 pass
 
-    body: dict = {"data": resource, "jsonapi": {"version": "1.0"}}
-    if extra_links:
-        body["links"] = extra_links
-    if included:
-        body["included"] = [
-            _serialize_resource(
-                r,
-                type_to_endpoint,
-                fields,
-                rel_to_endpoint=rel_to_endpoint,
-                rel_mgmt_to_endpoint=rel_mgmt_to_endpoint,
-            )
-            for r in included
-        ]
-    response = JsonResponse(body, status=201, content_type="application/vnd.api+json")
-    if location:
-        response["Location"] = location
-    return response
+            if related_link:
+                relationship.setdefault("links", {})["related"] = related_link
 
+            try:
+                relationship_link = reverse(
+                    f"{_type}__{relationship_name}__relationship", args=(_id,)
+                )
+            except (NoReverseMatch, ImproperlyConfigured):
+                pass
+            else:
+                relationship.setdefault("links", {})["self"] = relationship_link
 
-def _convert_rel_id(raw_id: Any, tp: type) -> Any:
-    origin = get_origin(tp)
-    if origin is list:
-        args = get_args(tp)
-        effective_type = args[0] if args else str
-    elif _is_nullable(tp):
-        non_null_args = [a for a in get_args(tp) if a is not type(None)]
-        effective_type = non_null_args[0] if non_null_args else str
-    else:
-        effective_type = tp
-    if effective_type is int:
-        return int(raw_id)
-    if effective_type is float:
-        return float(raw_id)
-    if effective_type is uuid_type.UUID:
-        return uuid_type.UUID(raw_id)
-    return raw_id
+    def _filter_out_sparse(self, resource: dict[str, Any], request: HttpRequest) -> None:
+        _type = resource.get("type")
+        if not _type:
+            return
 
+        allowed_fields: set[str] | None = None
+        for key in request.GET.keys():
+            if (m := re.search(r"^fields\[(\w+)\]$", key)) and m.group(1) == _type:
+                raw = request.GET.get(key, "")
+                allowed_fields = {f.strip() for f in raw.split(",") if f.strip()}
+                break
 
-def _validation_error_to_error_obj(exc: jsonschema.ValidationError) -> dict:
-    pointer_parts = ["data"] + [str(p) for p in exc.absolute_path]
-    return {
-        "status": "400",
-        "title": "Bad request",
-        "detail": exc.message,
-        "source": {"pointer": "/" + "/".join(pointer_parts)},
-    }
+        if allowed_fields is None:
+            return
+
+        if "attributes" in resource:
+            resource["attributes"] = {
+                k: v for k, v in resource["attributes"].items() if k in allowed_fields
+            }
+        if "relationships" in resource:
+            resource["relationships"] = {
+                k: v for k, v in resource["relationships"].items() if k in allowed_fields
+            }
+        if len(resource.get("attributes", {})) == 0:
+            resource.pop("attributes", None)
+        if len(resource.get("relationships", {})) == 0:
+            resource.pop("relationships", None)

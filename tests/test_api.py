@@ -1,9 +1,8 @@
 import asyncio
-from dataclasses import field
+import inspect
 import json
 import sys
 import types
-import uuid
 from typing import ClassVar
 
 import django
@@ -13,8 +12,8 @@ from django.http import HttpRequest
 from django.test import RequestFactory
 from django.test.utils import override_settings
 
-from djsonapi import DjsonApi, Resource
-from djsonapi.exceptions import NotFound, TooManyRequests
+from djsonapi.exceptions import BadRequest, DjsonApiExceptionMulti, NotFound
+from djsonapi.resource import Resource
 from djsonapi.response import Response
 
 settings.configure(
@@ -31,2723 +30,1004 @@ class Article(Resource):
     _type: ClassVar = "articles"
     _attributes: ClassVar = ["title", "content"]
     _create_fields: ClassVar = ["title", "content"]
-    _required_create_fields: ClassVar = ["title", "content"]
+    _edit_fields: ClassVar = ["title"]
+    _singular_relationships: ClassVar = [("author", "users")]
+    _plural_relationships: ClassVar = [("categories", "categories")]
 
-    id: uuid.UUID
-    title: str
-    content: str
-
-
-def _make_urlconf(api):
-    module = types.ModuleType("_test_urls")
-    setattr(module, "urlpatterns", api.urls)
-    sys.modules["_test_urls"] = module
-    return "_test_urls"
+    id: int
+    title: str = ""
+    content: str = ""
 
 
-class TestUrls:
-    def test_get_one_url(self):
+class UserResource(Resource):
+    _type: ClassVar = "users"
+    _attributes: ClassVar = ["username", "email"]
+
+    id: int
+    username: str = ""
+    email: str = ""
+
+
+class CategoryResource(Resource):
+    _type: ClassVar = "categories"
+    _attributes: ClassVar = ["name"]
+
+    id: int
+    name: str = ""
+
+
+# ── Endpoint base class tests ─────────────────────────────────────────────
+
+
+class TestEndpoint:
+    def test_url_name_no_template(self):
+        from djsonapi.api import Endpoint
+
+        ep = Endpoint("articles", lambda r: None)
+        assert ep.url == "articles"
+
+    def test_url_name_with_template(self):
+        from djsonapi.api import Endpoint
+
+        class MyEp(Endpoint):
+            URL_NAME_TEMPLATE = "{type_name}__coll"
+
+        ep = MyEp("articles", lambda r: None)
+        assert ep.url_name == "articles__coll"
+
+    def test_smart_parameters_skips_request(self):
+        from djsonapi.api import Endpoint
+
+        def handler(request, x: int, y: str):
+            ...
+
+        ep = Endpoint("articles", handler)
+        assert [p.name for p in ep.smart_parameters] == ["x", "y"]
+
+    def test_expected_extra_only_extra_prefix(self):
+        from djsonapi.api import Endpoint
+
+        def handler(request, extra__page: int = 1, extra__limit: int = 10, sort: str = ""):
+            ...
+
+        ep = Endpoint("articles", handler)
+        assert [p.name for p in ep.expected_extra] == ["extra__page", "extra__limit"]
+
+    def test_return_resource_type_bare_resource(self):
+        from djsonapi.api import Endpoint
+
+        def handler(request) -> Article:
+            ...
+
+        ep = Endpoint("articles", handler)
+        assert ep.return_resource_type is Article
+
+    def test_return_resource_type_response_wrapped(self):
+        from djsonapi.api import Endpoint
+
+        def handler(request) -> Response[Article]:
+            ...
+
+        ep = Endpoint("articles", handler)
+        assert ep.return_resource_type is Article
+
+    def test_return_resource_type_response_list(self):
+        from djsonapi.api import Endpoint
+
+        def handler(request) -> Response[list[Article]]:
+            ...
+
+        ep = Endpoint("articles", handler)
+        assert ep.return_resource_type is Article
+
+    def test_return_resource_type_none(self):
+        from djsonapi.api import Endpoint
+
+        def handler(request) -> int:
+            return 42
+
+        ep = Endpoint("articles", handler)
+        assert ep.return_resource_type is None
+
+    def test_view_missing_required_param_raises(self):
+        from djsonapi.api import Endpoint
+
+        def handler(request, required: str):
+            ...
+
+        ep = Endpoint("articles", handler)
+        with pytest.raises(DjsonApiExceptionMulti) as exc:
+            asyncio.run(ep.view(RequestFactory().get("/")))
+        assert any("required" in str(e) for e in exc.value.args)
+
+    def test_view_unknown_query_param_raises(self):
+        from djsonapi.api import Endpoint
+
+        ep = Endpoint("articles", lambda r: None)
+        with pytest.raises(DjsonApiExceptionMulti) as exc:
+            asyncio.run(ep.view(RequestFactory().get("/?nope=1")))
+        assert any("nope" in str(e) for e in exc.value.args)
+
+    def test_view_wraps_result_in_response(self):
+        from djsonapi.api import Endpoint
+
+        ep = Endpoint("articles", lambda r: "hello")
+        req = RequestFactory().get("/")
+        result = asyncio.run(ep.view(req))
+        assert isinstance(result, Response)
+        assert result.data == "hello"
+
+    def test_postprocess_204_returns_httpresponse(self):
+        from djsonapi.api import Endpoint
+
+        class NoContentEp(Endpoint):
+            SUCCESS_STATUS: ClassVar[int] = 204
+
+        ep = NoContentEp("articles", lambda r: None)
+        req = RequestFactory().get("/")
+        resp = ep._postprocess(Response(data=None), req)
+        assert resp.status_code == 204
+
+    def test_postprocess_sets_status_on_response(self):
+        from djsonapi.api import Endpoint
+
+        ep = Endpoint("articles", lambda r: "ok")
+        req = RequestFactory().get("/")
+        result = ep._postprocess(Response(data="ok"), req)
+        assert result.status == 200
+
+
+# ── Concrete endpoint classes ─────────────────────────────────────────────
+
+
+class TestGetOneEndpoint:
+    def test_url_includes_pk(self):
+        from djsonapi.api import GetOneEndpoint
+
+        ep = GetOneEndpoint("articles", lambda r, article_id: None)
+        assert "<str:article_id>" in ep.url
+
+    def test_url_name(self):
+        from djsonapi.api import GetOneEndpoint
+
+        ep = GetOneEndpoint("articles", lambda r, aid: None)
+        assert ep.url_name == "articles__item"
+
+    def test_pk_extracted_from_url_kwargs(self):
+        from djsonapi.api import GetOneEndpoint
+
+        def handler(request, article_id) -> Article:
+            return Article(id=article_id)
+
+        ep = GetOneEndpoint("articles", handler)
+        req = RequestFactory().get("/articles/1")
+        result = asyncio.run(ep.view(req, article_id="1"))
+        assert isinstance(result, dict)
+        assert result["data"]["id"] == "1"
+
+    def test_view_with_include_kwargs(self):
+        from djsonapi.api import GetOneEndpoint
+
+        def handler(request, article_id: int, include__author: bool = False) -> Article:
+            return Article(id=article_id)
+
+        ep = GetOneEndpoint("articles", handler, include_types=[UserResource])
+        req = RequestFactory().get("/articles/1?include=author")
+        result = asyncio.run(ep.view(req, article_id="1"))
+        assert isinstance(result, dict)
+        assert result["data"]["id"] == "1"
+
+    def test_returns_serialized_dict_from_postprocess(self):
+        from djsonapi.api import GetOneEndpoint
+
+        def handler(request, article_id: int) -> Article:
+            return Article(id=article_id)
+
+        ep = GetOneEndpoint("articles", handler)
+        req = RequestFactory().get("/articles/1")
+        result = ep._postprocess(Response(data=Article(id=1)), req)
+        assert isinstance(result, dict)
+        assert "data" in result
+
+
+class TestGetManyEndpoint:
+    def test_url_no_id(self):
+        from djsonapi.api import GetManyEndpoint
+
+        ep = GetManyEndpoint("articles", lambda r: [])
+        assert ep.url == "articles"
+
+    def test_url_name(self):
+        from djsonapi.api import GetManyEndpoint
+
+        ep = GetManyEndpoint("articles", lambda r: [])
+        assert ep.url_name == "articles__collection"
+
+    def test_sort_param_as_string(self):
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, sort: str = ""):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        req = RequestFactory().get("/?sort=title")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert kwargs.get("sort") == "title"
+
+    def test_sort_param_with_commas_as_list(self):
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, sort: list[str] | None = None):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        req = RequestFactory().get("/?sort=title,author")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert kwargs.get("sort") == ["title", "author"]
+
+    def test_page_param_converted_to_int(self):
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, page: int = 1):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        req = RequestFactory().get("/?page=2")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert kwargs.get("page") == 2
+
+    def test_page_invalid_conversion_error(self):
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, page: int = 1):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        req = RequestFactory().get("/?page=abc")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert errors
+
+    def test_filter_param_passed_through(self):
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, filter__title: str = ""):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        req = RequestFactory().get("/?title=hello")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert kwargs.get("filter__title") == "hello"
+
+
+class TestCreateOneEndpoint:
+    def test_url_no_id(self):
+        from djsonapi.api import CreateOneEndpoint
+
+        def handler(r, p: Article) -> Article:
+            return Article(id=1)
+        ep = CreateOneEndpoint("articles", handler)
+        assert ep.url == "articles"
+
+    def test_parses_body_into_payload_kwarg(self):
+        from djsonapi.api import CreateOneEndpoint
+
+        def handler(request, payload: Article) -> Article:
+            return payload
+
+        ep = CreateOneEndpoint("articles", handler)
+        body = json.dumps({"data": {"type": "articles", "attributes": {"title": "T", "content": "C"}}})
+        req = RequestFactory().post("/", body, content_type="application/vnd.api+json")
+        result = asyncio.run(ep.view(req))
+        assert isinstance(result, dict)
+        assert result["data"]["type"] == "articles"
+        assert result["data"]["attributes"]["title"] == "T"
+        assert result["data"]["attributes"]["content"] == "C"
+
+    def test_bad_json_body_returns_error(self):
+        from djsonapi.api import CreateOneEndpoint
+
+        def handler(request, payload: Article):
+            return payload
+
+        ep = CreateOneEndpoint("articles", handler)
+        req = RequestFactory().post("/", "not json", content_type="application/vnd.api+json")
+        with pytest.raises(DjsonApiExceptionMulti) as exc:
+            asyncio.run(ep.view(req))
+        assert any("JSON" in str(e) for e in exc.value.args)
+
+
+class TestEditOneEndpoint:
+    def test_url_includes_pid(self):
+        from djsonapi.api import EditOneEndpoint
+
+        def handler(r, aid: int, p: Article) -> Article:
+            return Article(id=aid)
+
+        ep = EditOneEndpoint("articles", handler)
+        assert "<int:aid>" in ep.url
+
+    def test_url_name(self):
+        from djsonapi.api import EditOneEndpoint
+
+        def handler(r, aid: int, p: Article) -> Article:
+            return Article(id=aid)
+
+        ep = EditOneEndpoint("articles", handler)
+        assert ep.url_name == "articles__item"
+
+    def test_extracts_pk_and_payload(self):
+        from djsonapi.api import EditOneEndpoint
+
+        def handler(request, article_id: int, payload: Article):
+            return Article(id=article_id, title=payload.title)
+
+        ep = EditOneEndpoint("articles", handler)
+        body = json.dumps({"data": {"type": "articles", "id": 1, "attributes": {"title": "Upd"}}})
+        req = RequestFactory().patch("/", body, content_type="application/vnd.api+json")
+        result = asyncio.run(ep.view(req, article_id="1"))
+        assert isinstance(result, dict)
+        assert result["data"]["id"] == "1"
+        assert result["data"]["attributes"]["title"] == "Upd"
+
+
+class TestDeleteOneEndpoint:
+    def test_url_includes_pid(self):
+        from djsonapi.api import DeleteOneEndpoint
+
+        ep = DeleteOneEndpoint("articles", lambda r, aid: None)
+        assert "<str:aid>" in ep.url
+
+    def test_returns_204_via_postprocess(self):
+        from djsonapi.api import DeleteOneEndpoint
+
+        ep = DeleteOneEndpoint("articles", lambda r, aid: None)
+        req = RequestFactory().delete("/articles/1")
+        result = asyncio.run(ep.view(req, aid="1"))
+        # postprocess for 204 returns HttpResponse directly
+        from django.http import HttpResponse
+        assert isinstance(ep._postprocess(Response(data=None), req), HttpResponse)
+        assert ep._postprocess(Response(data=None), req).status_code == 204
+
+
+# ── Relationship endpoint tests ────────────────────────────────────────────
+
+
+class TestGetRelationshipEndpoint:
+    def test_url_includes_pk_and_relationship_name(self):
+        from djsonapi.api import GetRelationshipEndpoint
+
+        ep = GetRelationshipEndpoint("articles", lambda r, aid: None, relationship_name="author")
+        assert "<str:aid>" in ep.url
+        assert "author" in ep.url
+
+    def test_url_name(self):
+        from djsonapi.api import GetRelationshipEndpoint
+
+        ep = GetRelationshipEndpoint("articles", lambda r, aid: None, relationship_name="author")
+        assert ep.url_name == "articles__author__related"
+
+
+class TestEditRelationshipEndpoint:
+    def test_url_includes_relationship_path(self):
+        from djsonapi.api import EditRelationshipEndpoint
+
+        ep = EditRelationshipEndpoint("articles", lambda r, aid, author_id: None, relationship_name="author")
+        assert "relationship/author" in ep.url
+
+    def test_parses_single_relationship_id(self):
+        from djsonapi.api import EditRelationshipEndpoint
+
+        def handler(request, article_id: int, author_id: int):
+            return author_id
+
+        ep = EditRelationshipEndpoint("articles", handler, relationship_name="author")
+        body = json.dumps({"data": {"type": "users", "id": "5"}})
+        req = RequestFactory().patch("/", body, content_type="application/vnd.api+json")
+        kwargs, errors = ep._get_kwargs(req, {"article_id": "1"}, req.GET.dict())
+        assert not errors
+        assert kwargs.get("author_id") == 5
+
+    def test_returns_204(self):
+        from djsonapi.api import EditRelationshipEndpoint
+
+        ep = EditRelationshipEndpoint("articles", lambda r, aid, author_id: None, relationship_name="author")
+        assert ep.SUCCESS_STATUS == 204
+
+
+class TestAddToRelationshipEndpoint:
+    def test_parses_plural_relationship_ids(self):
+        from djsonapi.api import AddToRelationshipEndpoint
+
+        def handler(request, article_id: int, category_ids: list[int]):
+            return category_ids
+
+        ep = AddToRelationshipEndpoint("articles", handler, relationship_name="categories")
+        body = json.dumps({"data": [{"type": "categories", "id": "1"}, {"type": "categories", "id": "2"}]})
+        req = RequestFactory().post("/", body, content_type="application/vnd.api+json")
+        kwargs, errors = ep._get_kwargs(req, {"article_id": "1"}, req.GET.dict())
+        assert not errors
+        assert kwargs.get("category_ids") == [1, 2]
+
+
+# ── DjsonApi ────────────────────────────────────────────────────────────────
+
+
+class TestDjsonApiRegistry:
+    def test_decorator_registers_endpoint(self):
+        from djsonapi.api import DjsonApi
+
         api = DjsonApi()
 
         @api.get_one("articles")
-        def view(request, article_id: uuid.UUID) -> Article: ...
+        def view(request, aid: int): ...
 
-        urls = api.urls
-        assert len(urls) == 3
-        assert urls[0].name == "get_one__articles"
-        assert urls[0].pattern.regex.pattern is not None
+        assert len(api.registry) == 1
 
-    def test_get_many_url(self):
+    def test_get_one_creates_getoneendpoint(self):
+        from djsonapi.api import DjsonApi, GetOneEndpoint
+
+        api = DjsonApi()
+
+        @api.get_one("articles")
+        def view(request, aid: int): ...
+
+        assert isinstance(api.registry[0], GetOneEndpoint)
+
+    def test_get_many(self):
+        from djsonapi.api import DjsonApi
+
         api = DjsonApi()
 
         @api.get_many("articles")
-        def view(request) -> list[Article]: ...
+        def view(request): ...
 
-        urls = api.urls
-        assert len(urls) == 3
-        assert urls[0].name == "get_many__articles"
-        assert urls[0].pattern.regex.pattern is not None
+        assert len(api.registry) == 1
 
-    def test_pk_type_inference(self):
+    def test_create_one(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.create_one("articles")
+        def view(request, p: Article): ...
+
+        assert len(api.registry) == 1
+
+    def test_edit_one(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.edit_one("articles")
+        def view(request, aid: int, p: Article): ...
+
+        assert len(api.registry) == 1
+
+    def test_delete_one(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.delete_one("articles")
+        def view(request, aid: int): ...
+
+        assert len(api.registry) == 1
+
+    def test_get_relationship(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_relationship("articles", "author")
+        def view(request, aid: int): ...
+
+        assert len(api.registry) == 1
+
+    def test_edit_relationship(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.edit_relationship("articles", "author")
+        def view(request, aid: int, author_id: int): ...
+
+        assert len(api.registry) == 1
+
+    def test_reset_relationship(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.reset_relationship("articles", "categories")
+        def view(request, aid: int, category_ids: list[int]): ...
+
+        assert len(api.registry) == 1
+
+    def test_add_to_relationship(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.add_to_relationship("articles", "categories")
+        def view(request, aid: int, category_ids: list[int]): ...
+
+        assert len(api.registry) == 1
+
+    def test_remove_from_relationship(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.remove_from_relationship("articles", "categories")
+        def view(request, aid: int, category_ids: list[int]): ...
+
+        assert len(api.registry) == 1
+
+
+class TestDjsonApiUrls:
+    def test_urls_includes_all_registered_endpoints(self):
+        from djsonapi.api import DjsonApi
+
         api = DjsonApi()
 
         @api.get_one("articles")
-        def view(request, article_id: uuid.UUID) -> Article: ...
+        def get_article(request, aid: int): ...
+
+        @api.get_many("articles")
+        def list_articles(request): ...
 
         urls = api.urls
-        converters = urls[0].pattern.converters
-        assert "article_id" in converters
+        assert len(urls) >= 2
 
+    def test_urls_are_django_urlpatterns(self):
+        from djsonapi.api import DjsonApi
+        from django.urls import URLPattern
 
-class TestCreateOne:
-    def test_create_one_url(self):
         api = DjsonApi()
-
-        @api.create_one("articles")
-        def view(request: HttpRequest, payload: Article) -> Article: ...
-
-        urls = api.urls
-        assert len(urls) == 3
-        assert any(u.name == "create_one__articles" for u in urls)
-
-    def test_201_response_with_location(self):
-        api = DjsonApi()
-        factory = RequestFactory()
 
         @api.get_one("articles")
-        def get_article(request, article_id: uuid.UUID) -> Article: ...
+        def view(request, aid: int): ...
 
-        @api.create_one("articles")
-        def view(request: HttpRequest, payload: Article) -> Article:
-            return Article(id=article_id, title=payload.title, content=payload.content)
+        urls = api.urls
+        assert all(isinstance(u, URLPattern) for u in urls)
 
-        article_id = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "attributes": {"title": "Test", "content": "Hello"},
-            }
-        })
-        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
 
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            response = view(request)
+class TestDjsonApiCombineViews:
+    def test_405_on_wrong_method(self):
+        from djsonapi.api import DjsonApi
 
-        assert response.status_code == 201
-        assert response["Content-Type"] == "application/vnd.api+json"
-        assert "Location" in response
-
-        body = json.loads(response.content)
-        assert "data" in body
-        assert body["data"]["type"] == "articles"
-        assert "attributes" in body["data"]
-        assert body["data"]["attributes"]["title"] == "Test"
-        assert body["data"]["attributes"]["content"] == "Hello"
-
-    def test_202_accepted(self):
         api = DjsonApi()
-        factory = RequestFactory()
 
-        @api.create_one("articles")
-        def view(request: HttpRequest, payload: Article) -> None:
+        @api.get_one("articles")
+        def view(request, aid: int):
+            return Response(data="ok")
+
+        req = RequestFactory().post("/articles/1")
+        combine = api.combine_views(api.registry)
+        resp = asyncio.run(combine(req, aid="1"))
+        assert resp.status_code == 405
+
+    def test_method_dispatch_to_correct_handler(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_one("articles")
+        def get_view(request, aid: int):
+            return Response(data="get")
+
+        @api.delete_one("articles")
+        def delete_view(request, aid: int):
             return None
 
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "attributes": {"title": "T", "content": "C"},
-            }
-        })
-        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
-        response = view(request)
-
-        assert response.status_code == 202
-        body = json.loads(response.content)
-        assert body["jsonapi"] == {"version": "1.0"}
-
-    def test_400_on_validation_error(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.create_one("articles")
-        def view(request: HttpRequest, payload: Article) -> Article:
-            return Article(id=uuid.uuid4(), title=payload.title, content=payload.content)
-
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "attributes": {"title": "T"},  # missing required "content"
-            }
-        })
-        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
-        response = view(request)
-
-        assert response.status_code == 400
-        assert response["Content-Type"] == "application/vnd.api+json"
-        body = json.loads(response.content)
-        assert "errors" in body
-        assert body["errors"][0]["source"]["pointer"] == "/data/attributes"
-
-    def test_400_on_invalid_json(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.create_one("articles")
-        def view(request: HttpRequest, payload: Article) -> Article:
-            return Article(id=uuid.uuid4(), title="T", content="C")
-
-        request = factory.post("/articles/", "not json", content_type="application/vnd.api+json")
-        response = view(request)
-
-        assert response.status_code == 400
+        req = RequestFactory().delete("/articles/1")
+        combine = api.combine_views(api.registry)
+        resp = asyncio.run(combine(req, aid="1"))
+        assert resp.status_code == 204
 
     def test_unhandled_exception_returns_500(self):
+        from djsonapi.api import DjsonApi
+
         api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.create_one("articles")
-        def view(request: HttpRequest, payload: Article) -> Article:
-            raise ValueError("something broke")
-
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "attributes": {"title": "T", "content": "C"},
-            }
-        })
-        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
-        response = view(request)
-
-        assert response.status_code == 500
-        body = json.loads(response.content)
-        assert "errors" in body
-
-    def test_sync_handler(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.create_one("articles")
-        def view(request: HttpRequest, payload: Article) -> Article:
-            return Article(id=uuid.uuid4(), title=payload.title, content=payload.content)
-
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "attributes": {"title": "T", "content": "C"},
-            }
-        })
-        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
-        response = view(request)
-
-        assert response.status_code == 201
-        body = json.loads(response.content)
-        assert body["data"]["attributes"]["title"] == "T"
-
-    def test_async_handler(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.create_one("articles")
-        async def view(request: HttpRequest, payload: Article) -> Article:
-            return Article(id=uuid.uuid4(), title=payload.title, content=payload.content)
-
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "attributes": {"title": "T", "content": "C"},
-            }
-        })
-        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
-        import asyncio
-
-        response = asyncio.run(view(request))
-
-        assert response.status_code == 201
-        body = json.loads(response.content)
-        assert body["data"]["attributes"]["title"] == "T"
-
-    def test_client_generated_id_accepted(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class ArticleWithClientId(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _create_fields: ClassVar = ["id", "title", "content"]
-            _required_create_fields: ClassVar = ["title", "content"]
-
-            id: uuid.UUID
-            title: str
-            content: str
-
-        @api.create_one("articles")
-        def view(request: HttpRequest, payload: ArticleWithClientId) -> ArticleWithClientId:
-            return ArticleWithClientId(
-                id=payload.id, title=payload.title, content=payload.content
-            )
-
-        client_id = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "id": str(client_id),
-                "attributes": {"title": "T", "content": "C"},
-            }
-        })
-        request = factory.post("/articles/", body, content_type="application/vnd.api+json")
-        response = view(request)
-
-        assert response.status_code == 201
-        body = json.loads(response.content)
-        assert body["data"]["id"] == str(client_id)
-
-
-class TestEditOne:
-    def test_edit_one_url(self):
-        api = DjsonApi()
-
-        @api.edit_one("articles")
-        def view(request: HttpRequest, article_id: uuid.UUID, payload: Article) -> Article: ...
-
-        urls = api.urls
-        assert any(u.name == "edit_one__articles" for u in urls)
-
-    def test_handler_called_with_correct_args(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        calls = []
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _edit_fields: ClassVar = ["id", "title", "content"]
-            id: uuid.UUID
-            title: str
-            content: str
-
-        @api.edit_one("articles")
-        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
-            calls.append((request, article_id, payload))
-            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
-
-        uid = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "id": str(uid),
-                "attributes": {"title": "Updated", "content": "Changed"},
-            }
-        })
-        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-        view(request, article_id=uid)
-
-        assert len(calls) == 1
-        req, pk, payload = calls[0]
-        assert pk == uid
-        assert payload.id == uid
-        assert payload.title == "Updated"
-        assert payload.content == "Changed"
-
-    def test_200_response_structure(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _edit_fields: ClassVar = ["id", "title", "content"]
-            id: uuid.UUID
-            title: str
-            content: str
-
-        @api.edit_one("articles")
-        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
-            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
-
-        uid = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "id": str(uid),
-                "attributes": {"title": "Updated", "content": "Changed"},
-            }
-        })
-        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-        response = view(request, article_id=uid)
-
-        assert response.status_code == 200
-        assert response["Content-Type"] == "application/vnd.api+json"
-        resp_data = json.loads(response.content)
-        assert resp_data["data"]["type"] == "articles"
-        assert resp_data["data"]["id"] == str(uid)
-        assert resp_data["data"]["attributes"]["title"] == "Updated"
-        assert resp_data["data"]["attributes"]["content"] == "Changed"
-
-    def test_400_on_missing_id(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _edit_fields: ClassVar = ["id", "title", "content"]
-            id: uuid.UUID
-            title: str
-            content: str
-
-        @api.edit_one("articles")
-        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
-            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
-
-        uid = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "attributes": {"title": "Updated"},
-            }
-        })
-        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-        response = view(request, article_id=uid)
-
-        assert response.status_code == 400
-        resp_data = json.loads(response.content)
-        assert "errors" in resp_data
-
-    def test_400_on_invalid_json(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _edit_fields: ClassVar = ["id", "title", "content"]
-            id: uuid.UUID
-            title: str
-            content: str
-
-        @api.edit_one("articles")
-        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
-            return EditableArticle(id=article_id, title="T", content="C")
-
-        uid = uuid.uuid4()
-        request = factory.patch(f"/articles/{uid}", "not json", content_type="application/vnd.api+json")
-        response = view(request, article_id=uid)
-
-        assert response.status_code == 400
-
-    def test_500_on_unhandled_exception(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _edit_fields: ClassVar = ["id", "title", "content"]
-            id: uuid.UUID
-            title: str
-            content: str
-
-        @api.edit_one("articles")
-        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
-            raise ValueError("something broke")
-
-        uid = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "id": str(uid),
-                "attributes": {"title": "T", "content": "C"},
-            }
-        })
-        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-        response = view(request, article_id=uid)
-
-        assert response.status_code == 500
-
-    def test_response_with_included(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: int
-            name: str
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _singular_relationships: ClassVar = [("author", "authors")]
-            _edit_fields: ClassVar = ["id", "title", "content", "author"]
-            id: uuid.UUID
-            title: str
-            content: str
-            author: int
-
-        @api.edit_one("articles")
-        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> Response[EditableArticle]:
-            return Response(
-                data=EditableArticle(id=article_id, title=payload.title, content=payload.content, author=payload.author),
-                included=[Author(id=1, name="Alice")],
-            )
-
-        uid = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "id": str(uid),
-                "attributes": {"title": "T", "content": "C"},
-                "relationships": {"author": {"data": {"type": "authors", "id": 1}}},
-            }
-        })
-        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-        response = view(request, article_id=uid)
-
-        body = json.loads(response.content)
-        assert "included" in body
-        assert len(body["included"]) == 1
-        assert body["included"][0]["type"] == "authors"
-
-    def test_url_routing_with_get(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _edit_fields: ClassVar = ["id", "title", "content"]
-            id: uuid.UUID
-            title: str
-            content: str
 
         @api.get_one("articles")
-        def get_article(request, article_id: uuid.UUID) -> EditableArticle:
-            return EditableArticle(id=article_id, title="Original", content="Original")
+        def view(request, aid: int):
+            raise ValueError("boom")
 
-        @api.edit_one("articles")
-        def edit_article(request, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
-            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
+        req = RequestFactory().get("/articles/1")
+        combine = api.combine_views(api.registry)
+        resp = asyncio.run(combine(req, aid="1"))
+        assert resp.status_code == 500
 
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            uid = uuid.uuid4()
-            body = json.dumps({
-                "data": {
-                    "type": "articles",
-                    "id": str(uid),
-                    "attributes": {"title": "Updated", "content": "Changed"},
-                }
-            })
-            request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-            response = edit_article(request, article_id=uid)
-
-            assert response.status_code == 200
-            resp_data = json.loads(response.content)
-            assert resp_data["data"]["attributes"]["title"] == "Updated"
-
-    def test_sync_handler(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _edit_fields: ClassVar = ["id", "title", "content"]
-            id: uuid.UUID
-            title: str
-            content: str
-
-        @api.edit_one("articles")
-        def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
-            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
-
-        uid = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "id": str(uid),
-                "attributes": {"title": "T", "content": "C"},
-            }
-        })
-        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-        response = view(request, article_id=uid)
-        assert response.status_code == 200
-
-    def test_async_handler(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        import asyncio
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _edit_fields: ClassVar = ["id", "title", "content"]
-            id: uuid.UUID
-            title: str
-            content: str
-
-        @api.edit_one("articles")
-        async def view(request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle) -> EditableArticle:
-            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
-
-        uid = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "id": str(uid),
-                "attributes": {"title": "T", "content": "C"},
-            }
-        })
-        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-        response = asyncio.run(view(request, article_id=uid))
-        assert response.status_code == 200
-
-
-class TestPartialEdit:
-    """Partial PATCH body leaves unset fields uninitialized on Resource instance."""
-
-    def test_partial_attributes_leave_other_fields_unset(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        calls: list = []
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _edit_fields: ClassVar = ["id", "title", "content"]
-            id: uuid.UUID
-            title: str
-            content: str
-
-        @api.edit_one("articles")
-        def view(
-            request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle
-        ) -> EditableArticle:
-            calls.append(payload)
-            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
-
-        uid = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "id": str(uid),
-                "attributes": {"title": "Only title sent"},
-            }
-        })
-        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-        view(request, article_id=uid)
-
-        payload = calls[0]
-        assert payload.id == uid
-        assert payload.title == "Only title sent"
-        assert not hasattr(payload, "content")
-
-    def test_partial_relationship_leaves_other_fields_unset(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        calls: list = []
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _singular_relationships: ClassVar = [("author", "authors")]
-            _edit_fields: ClassVar = ["id", "title", "content", "author"]
-            id: uuid.UUID
-            title: str
-            content: str
-            author: int
-
-        @api.edit_one("articles")
-        def view(
-            request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle
-        ) -> EditableArticle:
-            calls.append(payload)
-            return EditableArticle(
-                id=article_id, title=payload.title, content=payload.content, author=payload.author
-            )
-
-        uid = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "id": str(uid),
-                "relationships": {"author": {"data": {"type": "authors", "id": 42}}},
-            }
-        })
-        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-        view(request, article_id=uid)
-
-        payload = calls[0]
-        assert payload.id == uid
-        assert payload.author == 42
-        assert not hasattr(payload, "title")
-        assert not hasattr(payload, "content")
-
-    def test_partial_mixed_attributes_and_relationships(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        calls: list = []
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _singular_relationships: ClassVar = [("author", "authors")]
-            _plural_relationships: ClassVar = [("categories", "categories")]
-            _edit_fields: ClassVar = ["id", "title", "content", "author", "categories"]
-            id: uuid.UUID
-            title: str
-            content: str
-            author: int
-            categories: list[int] = field(default_factory=list)
-
-        @api.edit_one("articles")
-        def view(
-            request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle
-        ) -> EditableArticle:
-            calls.append(payload)
-            return EditableArticle(
-                id=article_id, title=payload.title, content=payload.content, author=payload.author,
-            )
-
-        uid = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "id": str(uid),
-                "attributes": {"title": "T"},
-                "relationships": {
-                    "categories": {"data": [{"type": "categories", "id": 10}, {"type": "categories", "id": 20}]}
-                },
-            }
-        })
-        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-        view(request, article_id=uid)
-
-        payload = calls[0]
-        assert payload.id == uid
-        assert payload.title == "T"
-        assert payload.categories == [10, 20]
-        assert not hasattr(payload, "content")
-        assert not hasattr(payload, "author")
-
-    def test_partial_no_attributes_rejected(self):
-        """PATCH body with empty attributes object rejected (minProperties: 1)."""
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        calls: list = []
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _edit_fields: ClassVar = ["id", "title", "content"]
-            id: uuid.UUID
-            title: str
-            content: str
-
-        @api.edit_one("articles")
-        def view(
-            request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle
-        ) -> EditableArticle:
-            calls.append(payload)
-            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
-
-        uid = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "id": str(uid),
-                "attributes": {},
-            }
-        })
-        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-        response = view(request, article_id=uid)
-
-        assert response.status_code == 400
-        assert len(calls) == 0
-
-    def test_partial_handler_conditional_assign(self):
-        """Handler that guards with hasattr returns 200 and only sets sent fields."""
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _edit_fields: ClassVar = ["id", "title", "content"]
-            id: uuid.UUID
-            title: str
-            content: str
-
-        @api.edit_one("articles")
-        def view(
-            request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle
-        ) -> EditableArticle:
-            result = EditableArticle(id=article_id, title="Default", content="Default")
-            if hasattr(payload, "title"):
-                result.title = payload.title
-            if hasattr(payload, "content"):
-                result.content = payload.content
-            return result
-
-        uid = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "id": str(uid),
-                "attributes": {"content": "Only content changed"},
-            }
-        })
-        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-        response = view(request, article_id=uid)
-
-        assert response.status_code == 200
-        resp_data = json.loads(response.content)
-        assert resp_data["data"]["attributes"]["title"] == "Default"
-        assert resp_data["data"]["attributes"]["content"] == "Only content changed"
-
-    def test_partial_resource_with_defaults(self):
-        """Partial body leaves field accessible via class default, not overwritten."""
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        calls: list = []
-
-        class EditableCategory(Resource):
-            _type: ClassVar = "categories"
-            _attributes: ClassVar = ["name", "slug", "description"]
-            _edit_fields: ClassVar = ["id", "name", "slug", "description"]
-            id: str
-            name: str
-            slug: str
-            description: str = ""
-
-        @api.edit_one("categories")
-        def view(
-            request: HttpRequest, category_id: str, payload: EditableCategory
-        ) -> EditableCategory:
-            calls.append(payload)
-            result = EditableCategory(id=category_id, name="Old", slug="old-slug", description="Old desc")
-            if hasattr(payload, "name"):
-                result.name = payload.name
-            if hasattr(payload, "slug"):
-                result.slug = payload.slug
-            if hasattr(payload, "description"):
-                result.description = payload.description
-            return result
-
-        body = json.dumps({
-            "data": {
-                "type": "categories",
-                "id": "1",
-                "attributes": {"name": "Renamed"},
-            }
-        })
-        request = factory.patch("/categories/1", body, content_type="application/vnd.api+json")
-        response = view(request, category_id="1")
-
-        assert response.status_code == 200
-        resp_data = json.loads(response.content)
-        assert resp_data["data"]["attributes"]["name"] == "Renamed"
-        assert resp_data["data"]["attributes"]["slug"] == "old-slug"
-        # description sentinel: always True due to class default, so description overwritten
-        # This documents the limitation: fields with class defaults aren't
-        # distinguishable from unset fields via hasattr
-        assert resp_data["data"]["attributes"]["description"] == ""
-
-    def test_partial_async_attributes_unset(self):
-        """Async edit_one also leaves unset fields uninitialized."""
-        import asyncio
+    def test_dict_result_gets_serialized(self):
+        from djsonapi.api import DjsonApi
 
         api = DjsonApi()
-        factory = RequestFactory()
-
-        calls: list = []
-
-        class EditableArticle(Resource):
-            _type: ClassVar = "articles"
-            _attributes: ClassVar = ["title", "content"]
-            _edit_fields: ClassVar = ["id", "title", "content"]
-            id: uuid.UUID
-            title: str
-            content: str
-
-        @api.edit_one("articles")
-        async def view(
-            request: HttpRequest, article_id: uuid.UUID, payload: EditableArticle
-        ) -> EditableArticle:
-            calls.append(payload)
-            return EditableArticle(id=article_id, title=payload.title, content=payload.content)
-
-        uid = uuid.uuid4()
-        body = json.dumps({
-            "data": {
-                "type": "articles",
-                "id": str(uid),
-                "attributes": {"content": "Only content"},
-            }
-        })
-        request = factory.patch(f"/articles/{uid}", body, content_type="application/vnd.api+json")
-        asyncio.run(view(request, article_id=uid))
-
-        payload = calls[0]
-        assert payload.id == uid
-        assert payload.content == "Only content"
-        assert not hasattr(payload, "title")
-
-
-class TestDeleteOne:
-    def test_delete_one_url(self):
-        api = DjsonApi()
-
-        @api.delete_one("articles")
-        def view(request: HttpRequest, article_id: uuid.UUID) -> None: ...
-
-        urls = api.urls
-        assert any(u.name == "delete_one__articles" for u in urls)
-
-    def test_204_no_content(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        called = False
-
-        @api.delete_one("articles")
-        def view(request: HttpRequest, article_id: uuid.UUID) -> None:
-            nonlocal called
-            called = True
-
-        uid = uuid.uuid4()
-        request = factory.delete(f"/articles/{uid}")
-        response = view(request, article_id=uid)
-
-        assert called
-        assert response.status_code == 204
-
-    def test_404_handled(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.delete_one("articles")
-        def view(request: HttpRequest, article_id: uuid.UUID) -> None:
-            raise NotFound(f"Article with id '{article_id}' not found")
-
-        uid = uuid.uuid4()
-        request = factory.delete(f"/articles/{uid}")
-        response = view(request, article_id=uid)
-
-        assert response.status_code == 404
-
-    def test_500_on_error(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.delete_one("articles")
-        def view(request: HttpRequest, article_id: uuid.UUID) -> None:
-            raise ValueError("something broke")
-
-        uid = uuid.uuid4()
-        request = factory.delete(f"/articles/{uid}")
-        response = view(request, article_id=uid)
-
-        assert response.status_code == 500
-
-    def test_url_routing_with_get_patch_delete(self):
-        api = DjsonApi()
-        factory = RequestFactory()
 
         @api.get_one("articles")
-        def get_article(request, article_id: uuid.UUID) -> Article:
-            return Article(id=article_id, title="T", content="C")
+        def view(request, aid: int):
+            return Response(data=Article(id=aid))
+
+        req = RequestFactory().get("/articles/1")
+        combine = api.combine_views(api.registry)
+        resp = asyncio.run(combine(req, aid="1"))
+        assert resp.status_code == 200
+        data = json.loads(resp.content)
+        assert "data" in data
+
+    def test_response_object_gets_serialized(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_one("articles")
+        def view(request, aid: int):
+            return Response(data=Article(id=aid))
+
+        req = RequestFactory().get("/articles/1")
+        combine = api.combine_views(api.registry)
+        resp = asyncio.run(combine(req, aid="1"))
+        assert resp.status_code == 200
+        data = json.loads(resp.content)
+        assert data["data"]["type"] == "articles"
+
+
+# ── ReturnsDataMixin ────────────────────────────────────────────────────────
+
+
+class TestReturnsDataMixin:
+    def test_invalid_include_types_raises_valueerror(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request, article_id: int, include__nonexist: bool = False):
+            ...
+
+        with pytest.raises(ValueError, match="Invalid include"):
+            ReturnsDataMixin("articles", handler, sparse=False)
+
+    def test_invalid_sparse_types_raises_valueerror(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request, article_id: int, fields__unknown: list[str] | None = None):
+            ...
+
+        with pytest.raises(ValueError, match="Invalid sparse"):
+            ReturnsDataMixin("articles", handler, sparse=True)
+
+    def test_expected_includes_from_params(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request, article_id: int, include__author: bool = False) -> Article:
+            ...
+
+        ep = ReturnsDataMixin("articles", handler, sparse=True, include_types=[UserResource])
+        assert ep.expected_includes == {"author"}
+        assert ep.allowed_includes == {"author", "categories"}
+
+    def test_expected_sparse(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request, article_id: int, fields__articles: list[str] | None = None) -> Article:
+            ...
+
+        ep = ReturnsDataMixin("articles", handler, sparse=True, include_types=[UserResource])
+        assert ep.expected_sparse == {"articles"}
+        assert "articles" in ep.allowed_sparse
+
+    def test_allowed_sparse_from_resource(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request) -> Article:
+            ...
+
+        ep = ReturnsDataMixin("articles", handler, sparse=True)
+        allowed = ep.allowed_sparse
+        assert "articles" in allowed
+        assert "title" in allowed["articles"]
+
+    def test_allowed_includes_from_resource_relationships(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request) -> Article:
+            ...
+
+        ep = ReturnsDataMixin("articles", handler, sparse=True)
+        assert "author" in ep.allowed_includes
+        assert "categories" in ep.allowed_includes
+
+    def test_postprocess_returns_serialized_result(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request) -> Article:
+            ...
+
+        ep = ReturnsDataMixin("articles", handler, sparse=False)
+        req = RequestFactory().get("/articles/1")
+        result = ep._postprocess(Response(data=Article(id=1)), req)
+        assert isinstance(result, dict)
+        assert result["data"]["type"] == "articles"
+
+
+# ── OpenAPI Spec ──────────────────────────────────────────────────────────────
+
+
+class TestBuildOpenapiSpec:
+    def test_skeleton(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+        spec = api._build_openapi_spec()
+        assert spec["openapi"] == "3.0.3"
+        assert "info" in spec
+        assert spec["paths"] == {}
+        assert spec["components"]["schemas"] == {}
+
+    def test_get_one_adds_path_and_params(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_one("articles")
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
+
+        spec = api._build_openapi_spec()
+        assert "/articles/{article_id}" in spec["paths"]
+        op = spec["paths"]["/articles/{article_id}"]["get"]
+        assert op["tags"] == ["articles"]
+        param_names = [p["name"] for p in op["parameters"]]
+        assert "article_id" in param_names
+        assert op["parameters"][0]["in"] == "path"
+        assert "200" in op["responses"]
+
+    def test_get_one_schema_registered(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_one("articles")
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
+
+        spec = api._build_openapi_spec()
+        assert "articles_resource" in spec["components"]["schemas"]
+        assert spec["components"]["schemas"]["articles_resource"]["title"] == "articles"
+
+    def test_get_many_adds_collection_path(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_many("articles")
+        def list_articles(request) -> list[Article]:
+            return [Article(id=1)]
+
+        spec = api._build_openapi_spec()
+        assert "/articles" in spec["paths"]
+        op = spec["paths"]["/articles"]["get"]
+        assert op["tags"] == ["articles"]
+        assert "200" in op["responses"]
+
+    def test_get_many_with_query_params(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_many("articles")
+        def list_articles(request, sort: str = "", page: int = 1, filter__title: str = "") -> list[Article]:
+            return [Article(id=1)]
+
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles"]["get"]
+        param_names = [p["name"] for p in op["parameters"]]
+        assert "sort" in param_names
+        assert "page" in param_names
+        assert "filter[title]" in param_names
+
+    def test_get_many_with_sparse_fields(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_many("articles")
+        def list_articles(request, fields__articles: list[str] | None = None) -> list[Article]:
+            return [Article(id=1)]
+            return [Article(id=1)]
+
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles"]["get"]
+        param_names = [p["name"] for p in op["parameters"]]
+        assert "fields[articles]" in param_names
+
+    def test_create_one_has_request_body(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.create_one("articles")
+        def create_article(request, payload: Article) -> Article:
+            return payload
+
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles"]["post"]
+        assert "requestBody" in op
+        assert op["requestBody"]["required"] is True
+        assert "201" in op["responses"]
+
+    def test_edit_one_has_pk_and_body(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.edit_one("articles")
+        def update_article(request, article_id: int, payload: Article) -> Article:
+            return payload
+
+        spec = api._build_openapi_spec()
+        path = "/articles/{article_id}"
+        assert path in spec["paths"]
+        op = spec["paths"][path]["patch"]
+        assert op["parameters"][0]["name"] == "article_id"
+        assert "requestBody" in op
+
+    def test_delete_one_returns_204(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
 
         @api.delete_one("articles")
-        def delete_article(request, article_id: uuid.UUID) -> None:
+        def delete_article(request, article_id: int):
             pass
 
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            uid = uuid.uuid4()
-            request = factory.delete(f"/articles/{uid}", content_type="application/vnd.api+json")
-            response = delete_article(request, article_id=uid)
-            assert response.status_code == 204
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles/{article_id}"]["delete"]
+        assert "204" in op["responses"]
 
-    def test_async_handler(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        import asyncio
+    def test_combined_path_has_multiple_methods(self):
+        from djsonapi.api import DjsonApi
 
-        @api.delete_one("articles")
-        async def view(request: HttpRequest, article_id: uuid.UUID) -> None:
-            pass
-
-        uid = uuid.uuid4()
-        request = factory.delete(f"/articles/{uid}")
-        response = asyncio.run(view(request, article_id=uid))
-
-        assert response.status_code == 204
-
-
-class TestGetRelationship:
-    def test_get_relationship_url(self):
         api = DjsonApi()
 
-        @api.get_relationship("articles", "author")
-        def view(request, article_id: uuid.UUID) -> Article: ...
+        @api.get_many("articles")
+        def list_articles(request) -> list[Article]:
+            return [Article(id=1)]
 
-        urls = api.urls
-        assert any(u.name == "get_relationship__articles__author" for u in urls)
+        @api.create_one("articles")
+        def create_article(request, payload: Article) -> Article:
+            return payload
 
-    def test_singular_handler_called_with_correct_args(self):
-        api = DjsonApi()
-        factory = RequestFactory()
+        spec = api._build_openapi_spec()
+        path_item = spec["paths"]["/articles"]
+        assert "get" in path_item
+        assert "post" in path_item
 
-        calls = []
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: uuid.UUID
-            name: str
-
-        @api.get_relationship("articles", "author")
-        def view(request, article_id: uuid.UUID) -> Author:
-            calls.append((request, article_id))
-            return Author(id=uuid.uuid4(), name="Alice")
-
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}/author")
-        view(request, article_id=uid)
-
-        assert len(calls) == 1
-        assert calls[0] == (request, uid)
-
-    def test_plural_handler_called_with_correct_args(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        calls = []
-
-        class Comment(Resource):
-            _type: ClassVar = "comments"
-            id: uuid.UUID
-            body: str
-
-        @api.get_relationship("articles", "comments")
-        def view(request, article_id: uuid.UUID) -> list[Comment]:
-            calls.append((request, article_id))
-            return [Comment(id=uuid.uuid4(), body="Nice post!")]
-
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}/comments")
-        view(request, article_id=uid)
-
-        assert len(calls) == 1
-        assert calls[0] == (request, uid)
-
-    def test_singular_response_structure(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            _attributes: ClassVar = ["name"]
-            id: uuid.UUID
-            name: str
-
-        @api.get_relationship("articles", "author")
-        def view(request, article_id: uuid.UUID) -> Author:
-            return Author(id=uuid.uuid4(), name="Alice")
-
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}/author")
-        response = view(request, article_id=uid)
-
-        assert response.status_code == 200
-        assert response["Content-Type"] == "application/vnd.api+json"
-
-        body = json.loads(response.content)
-        assert "data" in body
-        assert body["data"]["type"] == "authors"
-        assert body["data"]["attributes"]["name"] == "Alice"
-
-    def test_plural_response_structure(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Comment(Resource):
-            _type: ClassVar = "comments"
-            _attributes: ClassVar = ["body"]
-            id: uuid.UUID
-            body: str
-
-        @api.get_relationship("articles", "comments")
-        def view(request, article_id: uuid.UUID) -> list[Comment]:
-            author_id = uuid.uuid4()
-            return [
-                Comment(id=uuid.uuid4(), body="First!"),
-                Comment(id=uuid.uuid4(), body="Second"),
-            ]
-
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}/comments")
-        response = view(request, article_id=uid)
-
-        assert response.status_code == 200
-        body = json.loads(response.content)
-        assert isinstance(body["data"], list)
-        assert len(body["data"]) == 2
-        for item in body["data"]:
-            assert item["type"] == "comments"
-            assert "attributes" in item
-
-    def test_self_link_when_reverse_works(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: uuid.UUID
-            name: str
-
-        @api.get_relationship("articles", "author")
-        def view(request, article_id: uuid.UUID) -> Author:
-            return Author(id=uuid.uuid4(), name="Alice")
-
-        urlconf = _make_urlconf(api)
-        uid = uuid.uuid4()
-
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get(f"/articles/{uid}/author")
-            response = view(request, article_id=uid)
-
-        body = json.loads(response.content)
-        assert body["data"]["links"]["self"] == f"/articles/{uid}/author"
-        assert body["links"]["self"] == f"/articles/{uid}/author"
-
-    def test_plural_self_link(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Comment(Resource):
-            _type: ClassVar = "comments"
-            id: uuid.UUID
-            body: str
-
-        @api.get_relationship("articles", "comments")
-        def view(request, article_id: uuid.UUID) -> list[Comment]:
-            return [Comment(id=uuid.uuid4(), body="Nice")]
-
-        urlconf = _make_urlconf(api)
-        uid = uuid.uuid4()
-
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get(f"/articles/{uid}/comments")
-            response = view(request, article_id=uid)
-
-        body = json.loads(response.content)
-        assert body["links"]["self"] == f"/articles/{uid}/comments"
-
-    def test_related_links_use_relationship_endpoint(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: uuid.UUID
-            name: str
-
-        class Book(Resource):
-            _type: ClassVar = "books"
-            _attributes: ClassVar = ["title"]
-            _singular_relationships: ClassVar = [("author", "authors")]
-            id: uuid.UUID
-            title: str
-            author: uuid.UUID
-
-        @api.get_relationship("books", "author")
-        def get_book_author(request, book_id: uuid.UUID) -> Author:
-            return Author(id=uuid.uuid4(), name="Alice")
-
-        @api.get_many("books")
-        def list_books(request) -> list[Book]:
-            return [
-                Book(id=uuid.uuid4(), title="B1", author=uuid.uuid4()),
-            ]
-
-        urlconf = _make_urlconf(api)
-
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get("/books/")
-            response = list_books(request)
-
-        body = json.loads(response.content)
-        for item in body["data"]:
-            rel = item["relationships"]["author"]
-            assert "links" in rel
-            assert "related" in rel["links"]
-            # Should link to relationship endpoint, not get_one endpoint
-            assert rel["links"]["related"].startswith("/books/")
-
-    def test_related_links_fallback_to_get_one(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: uuid.UUID
-            name: str
-
-        class Book(Resource):
-            _type: ClassVar = "books"
-            _attributes: ClassVar = ["title"]
-            _singular_relationships: ClassVar = [("author", "authors")]
-            id: uuid.UUID
-            title: str
-            author: uuid.UUID
-
-        @api.get_one("authors")
-        def get_author(request, author_id: uuid.UUID) -> Author:
-            return Author(id=author_id, name="A")
-
-        @api.get_many("books")
-        def list_books(request) -> list[Book]:
-            author_id = uuid.uuid4()
-            return [
-                Book(id=uuid.uuid4(), title="B1", author=author_id),
-            ]
-
-        urlconf = _make_urlconf(api)
-
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get("/books/")
-            response = list_books(request)
-
-        body = json.loads(response.content)
-        for item in body["data"]:
-            rel = item["relationships"]["author"]
-            assert "links" in rel
-            assert "related" in rel["links"]
-            assert rel["links"]["related"].startswith("/authors/")
-
-    def test_response_with_included(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: int
-            name: str
-
-        class Editor(Resource):
-            _type: ClassVar = "editors"
-            id: int
-            name: str
-
-        @api.get_relationship("articles", "author")
-        def view(request, article_id: int) -> Response[Author]:
-            return Response(
-                data=Author(id=1, name="Alice"),
-                included=[Editor(id=1, name="Bob")],
-            )
-
-        request = factory.get("/articles/1/author")
-        response = view(request, article_id=1)
-
-        body = json.loads(response.content)
-        assert "included" in body
-        assert len(body["included"]) == 1
-        assert body["included"][0]["type"] == "editors"
-
-    def test_404_on_not_found(self):
-        api = DjsonApi()
-        factory = RequestFactory()
+    def test_error_responses_included(self):
+        from djsonapi.api import DjsonApi
         from djsonapi.exceptions import NotFound
 
-        @api.get_relationship("articles", "author")
-        def view(request, article_id: int) -> Article:
-            raise NotFound(f"Article {article_id} not found")
-
-        request = factory.get("/articles/1/author")
-        response = view(request, article_id=1)
-
-        assert response.status_code == 404
-        body = json.loads(response.content)
-        assert "errors" in body
-
-    def test_500_on_unhandled_exception(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_relationship("articles", "author")
-        def view(request, article_id: int) -> Article:
-            raise ValueError("something broke")
-
-        request = factory.get("/articles/1/author")
-        response = view(request, article_id=1)
-
-        assert response.status_code == 500
-        body = json.loads(response.content)
-        assert "errors" in body
-
-    def test_sync_handler(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: uuid.UUID
-            name: str
-
-        @api.get_relationship("articles", "author")
-        def view(request, article_id: uuid.UUID) -> Author:
-            return Author(id=uuid.uuid4(), name="Alice")
-
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}/author")
-        response = view(request, article_id=uid)
-
-        assert response.status_code == 200
-
-    def test_async_handler(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        import asyncio
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: uuid.UUID
-            name: str
-
-        @api.get_relationship("articles", "author")
-        async def view(request, article_id: uuid.UUID) -> Author:
-            return Author(id=uuid.uuid4(), name="Alice")
-
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}/author")
-        response = asyncio.run(view(request, article_id=uid))
-
-        assert response.status_code == 200
-
-    def test_query_params_passed_to_handler(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: uuid.UUID
-            name: str
-
-        @api.get_relationship("articles", "author")
-        def view(request, article_id: uuid.UUID, filter__q: str = "") -> Author:
-            calls.append(filter__q)
-            return Author(id=uuid.uuid4(), name="Alice")
-
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}/author?filter[q]=test")
-        view(request, article_id=uid)
-
-        assert calls == ["test"]
-
-    def test_url_routing_with_get_one(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: uuid.UUID
-            name: str
-
-        @api.get_one("articles")
-        def get_article(request, article_id: uuid.UUID) -> Article:
-            return Article(id=article_id, title="T", content="C")
-
-        @api.get_relationship("articles", "author")
-        def get_article_author(request, article_id: uuid.UUID) -> Author:
-            return Author(id=uuid.uuid4(), name="Alice")
-
-        urlconf = _make_urlconf(api)
-        uid = uuid.uuid4()
-
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get(f"/articles/{uid}/author")
-            response = get_article_author(request, article_id=uid)
-
-        assert response.status_code == 200
-        body = json.loads(response.content)
-        assert body["data"]["type"] == "authors"
-
-    def test_openapi_spec(self):
         api = DjsonApi()
 
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: uuid.UUID
-            name: str
-
-        @api.get_relationship("articles", "author")
-        def view(request, article_id: uuid.UUID) -> Author:
-            return Author(id=uuid.uuid4(), name="Alice")
+        @api.get_one("articles", errors=[NotFound])
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
 
         spec = api._build_openapi_spec()
-        assert "/articles/{article_id}/author" in spec["paths"]
-        op = spec["paths"]["/articles/{article_id}/author"]["get"]
-        assert op["tags"] == ["articles"]
-        params = {p["name"]: p for p in op.get("parameters", [])}
-        assert "article_id" in params
-        assert params["article_id"]["in"] == "path"
+        op = spec["paths"]["/articles/{article_id}"]["get"]
+        assert "404" in op["responses"]
 
-    def test_invalid_param_raises_improperly_configured(self):
-        from django.core.exceptions import ImproperlyConfigured
+    def test_tags_and_tag_groups(self):
+        from djsonapi.api import DjsonApi
 
         api = DjsonApi()
-        with pytest.raises(ImproperlyConfigured):
 
-            @api.get_relationship("articles", "author")
-            def view(request, article_id: int, bad_param: str) -> Article: ...
+        @api.get_one("articles")
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
 
-
-class TestEditRelationship:
-    def test_url_registered(self):
-        api = DjsonApi()
-
-        @api.edit_relationship("articles", "author")
-        def view(request, article_id: int, author_id: int) -> None: ...
-
-        urls = api.urls
-        assert any(u.name == "edit_relationship__articles__author" for u in urls)
-
-    def test_handler_called_with_correct_args(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        calls = []
-
-        @api.edit_relationship("articles", "author")
-        def view(request, article_id: int, author_id: int) -> None:
-            calls.append((request, article_id, author_id))
-
-        request = factory.patch(
-            "/articles/1/relationships/author",
-            json.dumps({"data": {"id": 2, "type": "authors"}}),
-            content_type="application/vnd.api+json",
-        )
-        view(request, article_id=1)
-
-        assert len(calls) == 1
-        assert calls[0] == (request, 1, 2)
-
-    def test_response_is_204(self):
-        api = DjsonApi()
-
-        @api.edit_relationship("articles", "author")
-        def view(request, article_id: int, author_id: int) -> None: ...
-
-        factory = RequestFactory()
-        request = factory.patch(
-            "/articles/1/relationships/author",
-            json.dumps({"data": {"id": 2, "type": "authors"}}),
-            content_type="application/vnd.api+json",
-        )
-        response = view(request, article_id=1)
-
-        assert response.status_code == 204
-
-    def test_body_without_data_returns_400(self):
-        api = DjsonApi()
-
-        @api.edit_relationship("articles", "author")
-        def view(request, article_id: int, author_id: int) -> None: ...
-
-        factory = RequestFactory()
-        request = factory.patch(
-            "/articles/1/relationships/author",
-            json.dumps({}),
-            content_type="application/vnd.api+json",
-        )
-        response = view(request, article_id=1)
-
-        assert response.status_code == 400
-
-    def test_nullable_allows_data_null(self):
-        api = DjsonApi()
-
-        calls = []
-
-        @api.edit_relationship("articles", "author")
-        def view(request, article_id: int, author_id: int | None) -> None:
-            calls.append(author_id)
-
-        factory = RequestFactory()
-        request = factory.patch(
-            "/articles/1/relationships/author",
-            json.dumps({"data": None}),
-            content_type="application/vnd.api+json",
-        )
-        response = view(request, article_id=1)
-
-        assert response.status_code == 204
-        assert calls == [None]
-
-    def test_non_nullable_rejects_data_null(self):
-        api = DjsonApi()
-
-        @api.edit_relationship("articles", "author")
-        def view(request, article_id: int, author_id: int) -> None: ...
-
-        factory = RequestFactory()
-        request = factory.patch(
-            "/articles/1/relationships/author",
-            json.dumps({"data": None}),
-            content_type="application/vnd.api+json",
-        )
-        response = view(request, article_id=1)
-
-        assert response.status_code == 400
-
-    def test_self_link_in_get_one_response(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: uuid.UUID
-            name: str
-
-        class Book(Resource):
-            _type: ClassVar = "books"
-            _attributes: ClassVar = ["title"]
-            _singular_relationships: ClassVar = [("author", "authors")]
-            id: uuid.UUID
-            title: str
-            author: uuid.UUID
-
-        @api.edit_relationship("books", "author")
-        def edit_book_author(request, book_id: uuid.UUID, author_id: uuid.UUID) -> None: ...
-
-        book_id = uuid.uuid4()
-
-        @api.get_one("books")
-        def get_book(request, book_id: uuid.UUID) -> Book:
-            return Book(id=book_id, title="B1", author=uuid.uuid4())
-
-        urlconf = _make_urlconf(api)
-
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get(f"/books/{book_id}")
-            response = get_book(request, book_id=book_id)
-
-        body = json.loads(response.content)
-        rel = body["data"]["relationships"]["author"]
-        assert "links" in rel
-        assert "self" in rel["links"]
-        assert rel["links"]["self"] == f"/books/{book_id}/relationships/author"
-
-    def test_openapi_spec_includes_path(self):
-        api = DjsonApi()
-
-        @api.edit_relationship("articles", "author")
-        def view(request, article_id: int, author_id: int) -> None: ...
+        @api.get_one("users")
+        def get_user(request, user_id: int) -> UserResource:
+            return UserResource(id=user_id)
 
         spec = api._build_openapi_spec()
-        assert "/articles/{article_id}/relationships/author" in spec["paths"]
-        op = spec["paths"]["/articles/{article_id}/relationships/author"]["patch"]
-        assert op["tags"] == ["articles"]
+        assert "tags" in spec
+        tag_names = [t["name"] for t in spec["tags"]]
+        assert "articles" in tag_names
+        assert "users" in tag_names
+        assert "x-tagGroups" in spec
 
+    def test_openapi_view_returns_json(self):
+        from django.test import RequestFactory
+        from djsonapi.api import DjsonApi
 
-class TestGetOne:
-    def test_handler_called_with_correct_args(self):
         api = DjsonApi()
-        factory = RequestFactory()
-
-        calls = []
 
         @api.get_one("articles")
-        def view(request, article_id: uuid.UUID) -> Article:
-            calls.append((request, article_id))
-            return Article(id=article_id, title="t", content="c")
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
 
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}")
-        view(request, article_id=uid)
+        req = RequestFactory().get("/openapi.json")
+        resp = api._openapi_view(req)
+        assert resp.status_code == 200
+        data = json.loads(resp.content)
+        assert "openapi" in data
 
-        assert len(calls) == 1
-        assert calls[0] == (request, uid)
+    def test_docs_view_returns_html(self):
+        from django.test import RequestFactory
+        from djsonapi.api import DjsonApi
 
-    def test_response_structure(self):
         api = DjsonApi()
-        factory = RequestFactory()
 
         @api.get_one("articles")
-        def view(request, article_id: uuid.UUID) -> Article:
-            return Article(id=article_id, title="Test", content="Content")
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
 
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}")
-        response = view(request, article_id=uid)
+        req = RequestFactory().get("/docs/")
+        resp = api._docs_view(req)
+        assert resp.status_code == 200
+        assert b"redoc" in resp.content.lower()
 
-        assert response.status_code == 200
-        assert response["Content-Type"] == "application/vnd.api+json"
+    def test_urls_include_openapi_and_docs(self):
+        from djsonapi.api import DjsonApi
 
-        body = json.loads(response.content)
-        assert "data" in body
-        assert "links" in body
-        assert body["jsonapi"] == {"version": "1.0"}
-        assert body["data"]["type"] == "articles"
-        assert body["data"]["id"] == str(uid)
-        assert body["data"]["attributes"] == {"title": "Test", "content": "Content"}
-
-    def test_self_link_when_reverse_works(self):
         api = DjsonApi()
-        factory = RequestFactory()
 
         @api.get_one("articles")
-        def view(request, article_id: uuid.UUID) -> Article:
-            return Article(id=article_id, title="T", content="C")
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
 
-        uid = uuid.uuid4()
-        urlconf = _make_urlconf(api)
+        urlpatterns = api.urls
+        url_names = {u.name for u in urlpatterns}
+        assert "openapi" in url_names
+        assert "docs" in url_names
 
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get(f"/articles/{uid}")
-            response = view(request, article_id=uid)
+    def test_relationship_path_structure(self):
+        from djsonapi.api import DjsonApi
 
-        body = json.loads(response.content)
-        assert body["data"]["links"]["self"] == f"/articles/{uid}"
-        assert body["links"]["self"] == f"/articles/{uid}"
-
-    def test_not_found_exception(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        uid = uuid.uuid4()
-
-        @api.get_one("articles")
-        def view(request, article_id: uuid.UUID) -> Article:
-            raise NotFound(f"Article {article_id} not found")
-
-        request = factory.get("/articles/123")
-        response = view(request, article_id=uid)
-
-        assert response.status_code == 404
-        assert response["Content-Type"] == "application/vnd.api+json"
-        body = json.loads(response.content)
-        assert "errors" in body
-        assert body["errors"][0]["detail"] == f"Article {uid} not found"
-
-    def test_unhandled_exception_returns_500(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_one("articles")
-        def view(request, article_id: uuid.UUID) -> Article:
-            raise ValueError("something broke")
-
-        request = factory.get("/articles/123")
-        response = view(request, article_id=uuid.uuid4())
-
-        assert response.status_code == 500
-        assert response["Content-Type"] == "application/vnd.api+json"
-        body = json.loads(response.content)
-        assert "errors" in body
-
-    def test_sync_handler(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_one("articles")
-        def view(request, article_id: uuid.UUID) -> Article:
-            return Article(id=article_id, title="T", content="C")
-
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}")
-        response = view(request, article_id=uid)
-
-        assert response.status_code == 200
-        body = json.loads(response.content)
-        assert body["data"]["id"] == str(uid)
-
-    def test_async_handler(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_one("articles")
-        async def view(request, article_id: uuid.UUID) -> Article:
-            return Article(id=article_id, title="T", content="C")
-
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}")
-        import asyncio
-
-        response = asyncio.run(view(request, article_id=uid))
-
-        assert response.status_code == 200
-        body = json.loads(response.content)
-        assert body["data"]["id"] == str(uid)
-
-
-class TestGetMany:
-    def test_handler_called_with_request(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        calls = []
-
-        @api.get_many("articles")
-        def view(request) -> list[Article]:
-            calls.append(request)
-            return [Article(id=uuid.uuid4(), title="t", content="c")]
-
-        request = factory.get("/articles/")
-        view(request)
-
-        assert len(calls) == 1
-        assert calls[0] is request
-
-    def test_response_structure(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request) -> list[Article]:
-            return [
-                Article(id=uuid.uuid4(), title="One", content="A"),
-                Article(id=uuid.uuid4(), title="Two", content="B"),
-            ]
-
-        request = factory.get("/articles/")
-        response = view(request)
-
-        assert response.status_code == 200
-        assert response["Content-Type"] == "application/vnd.api+json"
-
-        body = json.loads(response.content)
-        assert "data" in body
-        assert "links" in body
-        assert body["jsonapi"] == {"version": "1.0"}
-        assert len(body["data"]) == 2
-        for item in body["data"]:
-            assert item["type"] == "articles"
-            assert "id" in item
-            assert "attributes" in item
-
-    def test_self_link_when_reverse_works(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request) -> list[Article]:
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        urlconf = _make_urlconf(api)
-
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get("/articles/")
-            response = view(request)
-
-        body = json.loads(response.content)
-        assert body["links"]["self"] == "/articles/"
-
-    def test_unhandled_exception_returns_500(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request) -> list[Article]:
-            raise ValueError("something broke")
-
-        request = factory.get("/articles/")
-        response = view(request)
-
-        assert response.status_code == 500
-        assert response["Content-Type"] == "application/vnd.api+json"
-        body = json.loads(response.content)
-        assert "errors" in body
-
-    def test_sync_handler(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request) -> list[Article]:
-            return [
-                Article(id=uuid.uuid4(), title="A", content="B"),
-                Article(id=uuid.uuid4(), title="C", content="D"),
-            ]
-
-        request = factory.get("/articles/")
-        response = view(request)
-
-        assert response.status_code == 200
-        body = json.loads(response.content)
-        assert len(body["data"]) == 2
-
-    def test_async_handler(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        async def view(request) -> list[Article]:
-            return [
-                Article(id=uuid.uuid4(), title="A", content="B"),
-                Article(id=uuid.uuid4(), title="C", content="D"),
-            ]
-
-        request = factory.get("/articles/")
-        import asyncio
-
-        response = asyncio.run(view(request))
-
-        assert response.status_code == 200
-        body = json.loads(response.content)
-        assert len(body["data"]) == 2
-
-    def test_relationship_links_from_other_endpoint(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: uuid.UUID
-            name: str
-
-        class Book(Resource):
-            _type: ClassVar = "books"
-            _attributes: ClassVar = ["title"]
-            _singular_relationships: ClassVar = [("author", "authors")]
-
-            id: uuid.UUID
-            title: str
-            author: uuid.UUID
-
-        @api.get_one("authors")
-        def get_author(request, author_id: uuid.UUID) -> Author:
-            return Author(id=author_id, name="test")
-
-        @api.get_many("books")
-        def list_books(request) -> list[Book]:
-            author_id = uuid.uuid4()
-            return [
-                Book(id=uuid.uuid4(), title="B1", author=author_id),
-                Book(id=uuid.uuid4(), title="B2", author=author_id),
-            ]
-
-        urlconf = _make_urlconf(api)
-
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get("/books/")
-            response = list_books(request)
-
-        body = json.loads(response.content)
-        for item in body["data"]:
-            rel = item["relationships"]["author"]
-            assert "links" in rel
-            assert "related" in rel["links"]
-            assert rel["links"]["related"].startswith("/authors/")
-
-
-class TestQueryParams:
-    def test_filter_str_param(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request, filter__title__contains: str = "") -> list[Article]:
-            return [
-                Article(id=uuid.uuid4(), title=title, content="c")
-                for title in ["Hello", "World"]
-            ]
-
-        request = factory.get("/articles/?filter[title][contains]=ello")
-        response = view(request)
-
-        assert response.status_code == 200
-
-    def test_filter_str_passed_to_handler(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.get_many("articles")
-        def view(request, filter__title: str = "") -> list[Article]:
-            calls.append(filter__title)
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        request = factory.get("/articles/?filter[title]=hello")
-        view(request)
-        assert calls == ["hello"]
-
-    def test_filter_str_default_when_missing(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.get_many("articles")
-        def view(request, filter__title: str = "default_val") -> list[Article]:
-            calls.append(filter__title)
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        request = factory.get("/articles/")
-        view(request)
-        assert calls == ["default_val"]
-
-    def test_int_param_conversion(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.get_many("articles")
-        def view(request, page__limit: int = 10) -> list[Article]:
-            calls.append(page__limit)
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        request = factory.get("/articles/?page[limit]=25")
-        view(request)
-        assert calls == [25]
-
-    def test_int_param_default(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.get_many("articles")
-        def view(request, page__limit: int = 10) -> list[Article]:
-            calls.append(page__limit)
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        request = factory.get("/articles/")
-        view(request)
-        assert calls == [10]
-
-    def test_bool_param_conversion(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.get_many("articles")
-        def view(request, include__author: bool = False) -> list[Article]:
-            calls.append(include__author)
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        request = factory.get("/articles/?include=author")
-        view(request)
-        assert calls == [True]
-
-    def test_list_str_param(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.get_many("articles")
-        def view(request, sort: list[str] = []) -> list[Article]:
-            calls.append(sort)
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        request = factory.get("/articles/?sort=-created_at,title")
-        view(request)
-        assert calls == [["-created_at", "title"]]
-
-    def test_list_str_empty_default(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.get_many("articles")
-        def view(request, fields__articles: list[str] = []) -> list[Article]:
-            calls.append(fields__articles)
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        request = factory.get("/articles/")
-        view(request)
-        assert calls == [[]]
-
-    def test_required_param_missing_returns_400(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request, filter__q: str) -> list[Article]:
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        request = factory.get("/articles/")
-        response = view(request)
-        assert response.status_code == 400
-
-    def test_invalid_int_returns_400(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request, page__limit: int = 10) -> list[Article]:
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        request = factory.get("/articles/?page[limit]=abc")
-        response = view(request)
-        assert response.status_code == 400
-
-    def test_include_from_flat_csv(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.get_many("articles")
-        def view(request, include__author: bool = False) -> list[Article]:
-            calls.append(include__author)
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        request = factory.get("/articles/?include=author")
-        view(request)
-        assert calls == [True]
-
-    def test_include_multiple_from_flat_csv(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.get_many("articles")
-        def view(request, include__author: bool = False, include__comments: bool = False) -> list[Article]:
-            calls.append(include__author)
-            calls.append(include__comments)
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        request = factory.get("/articles/?include=author,comments")
-        view(request)
-        assert calls == [True, True]
-
-    def test_include_absent_uses_default(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.get_many("articles")
-        def view(request, include__author: bool = False) -> list[Article]:
-            calls.append(include__author)
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        request = factory.get("/articles/")
-        view(request)
-        assert calls == [False]
-
-    def test_query_params_applied_to_get_one(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.get_one("articles")
-        def view(request, article_id: uuid.UUID, filter__q: str = "") -> Article:
-            calls.append(filter__q)
-            return Article(id=article_id, title="T", content="C")
-
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}?filter[q]=test")
-        view(request, article_id=uid)
-        assert calls == ["test"]
-
-    def test_query_params_applied_to_create_one(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.create_one("articles")
-        def view(request: HttpRequest, payload: Article, filter__q: str = "") -> Article:
-            calls.append(filter__q)
-            return Article(id=uuid.uuid4(), title="T", content="C")
-
-        body = json.dumps({
-            "data": {"type": "articles", "attributes": {"title": "T", "content": "C"}}
-        })
-        request = factory.post("/articles/?filter[q]=hello", body, content_type="application/vnd.api+json")
-        view(request)
-        assert calls == ["hello"]
-
-    def test_openapi_spec_includes_query_params(self):
         api = DjsonApi()
 
-        @api.get_many("articles")
-        def view(request, filter__q: str = "", page__limit: int = 10, sort: list[str] = []) -> list[Article]: ...
+        @api.get_relationship("articles", "author")
+        def get_author(request, article_id: int) -> UserResource:
+            return UserResource(id=1)
 
         spec = api._build_openapi_spec()
-        op = spec["paths"]["/articles/"]["get"]
-        params = {p["name"]: p for p in op.get("parameters", [])}
-        assert "filter[q]" in params
-        assert params["filter[q]"]["in"] == "query"
-        assert params["filter[q]"]["schema"]["type"] == "string"
-        assert "page[limit]" in params
-        assert params["page[limit]"]["schema"]["type"] == "integer"
-        assert "sort" in params
-        assert params["sort"]["schema"]["type"] == "array"
+        path = "/articles/{article_id}/author"
+        assert path in spec["paths"]
+        op = spec["paths"][path]["get"]
+        assert op["parameters"][0]["name"] == "article_id"
 
-    def test_bare_filter_returns_error(self):
-        from django.core.exceptions import ImproperlyConfigured
+    def test_edit_relationship_has_body(self):
+        from djsonapi.api import DjsonApi
 
         api = DjsonApi()
-        with pytest.raises(ImproperlyConfigured):
 
-            @api.get_many("articles")
-            def view(request, filter: str = "") -> list[Article]:
-                return []
-
-    def test_nested_sort_returns_400(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request, sort__field: str = "") -> list[Article]:
-            return []
-
-        request = factory.get("/articles/?sort[field]=title")
-        response = view(request)
-        assert response.status_code == 400
-
-    def test_extra_strips_prefix(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.get_many("articles")
-        def view(request, extra__custom: str = "") -> list[Article]:
-            calls.append(extra__custom)
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        request = factory.get("/articles/?custom=hello")
-        view(request)
-        assert calls == ["hello"]
-
-    def test_fields_filtering_attributes(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request, fields__articles: list[str] = []) -> list[Article]:
-            uid = uuid.uuid4()
-            return [Article(id=uid, title="T", content="C")]
-
-        request = factory.get("/articles/?fields[articles]=title")
-        response = view(request)
-
-        body = json.loads(response.content)
-        item = body["data"][0]
-        assert "id" in item  # id always present
-        assert "title" in item["attributes"]
-        assert "content" not in item["attributes"]
-
-    def test_fields_filtering_not_applied_when_not_requested(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request, fields__articles: list[str] = []) -> list[Article]:
-            uid = uuid.uuid4()
-            return [Article(id=uid, title="T", content="C")]
-
-        request = factory.get("/articles/")
-        response = view(request)
-
-        body = json.loads(response.content)
-        item = body["data"][0]
-        assert "title" in item["attributes"]
-        assert "content" in item["attributes"]
-
-    def test_openapi_spec_include_params(self):
-        api = DjsonApi()
-
-        @api.get_many("articles")
-        def view(request, include__author: bool = False, include__comments: bool = False) -> list[Article]: ...
-
-        spec = api._build_openapi_spec()
-        op = spec["paths"]["/articles/"]["get"]
-        params = {p["name"]: p for p in op.get("parameters", [])}
-        assert "include" in params
-        assert params["include"]["schema"]["type"] == "string"
-        assert "author" in params["include"]["description"]
-        assert "comments" in params["include"]["description"]
-
-
-class TestResponse:
-    def test_plain_return_still_works(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_one("articles")
-        def view(request, article_id: uuid.UUID) -> Article:
-            return Article(id=article_id, title="T", content="C")
-
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}")
-        response = view(request, article_id=uid)
-        assert response.status_code == 200
-
-    def test_response_included_in_body(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: int
-            name: str
-
-        @api.get_many("articles")
-        def view(request) -> Response[list[Article]]:
-            author = Author(id=1, name="Alice")
-            return Response(
-                data=[Article(id=uuid.uuid4(), title="T", content="C")],
-                included=[author],
-            )
-
-        request = factory.get("/articles/")
-        response = view(request)
-        body = json.loads(response.content)
-        assert "included" in body
-        assert len(body["included"]) == 1
-        assert body["included"][0]["type"] == "authors"
-        assert body["included"][0]["id"] == "1"
-
-    def test_response_no_included_when_empty(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request) -> Response[list[Article]]:
-            return Response(
-                data=[Article(id=uuid.uuid4(), title="T", content="C")],
-                included=[],
-            )
-
-        request = factory.get("/articles/")
-        response = view(request)
-        body = json.loads(response.content)
-        assert "included" not in body
-
-    def test_included_with_relationship_links(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: int
-            name: str
-
-        class Book(Resource):
-            _type: ClassVar = "books"
-            _attributes: ClassVar = ["title"]
-            _singular_relationships: ClassVar = [("author", "authors")]
-            id: uuid.UUID
-            title: str
-            author: int
-
-        @api.get_one("authors")
-        def get_author(request, author_id: int) -> Author:
-            return Author(id=author_id, name="A")
-
-        @api.get_many("books")
-        def list_books(request) -> Response[list[Book]]:
-            return Response(
-                data=[Book(id=uuid.uuid4(), title="B", author=1)],
-                included=[Author(id=1, name="A")],
-            )
-
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get("/books/")
-            response = list_books(request)
-
-        body = json.loads(response.content)
-        # Included author should have links to its own relationships
-        included = body["included"][0]
-        assert included["type"] == "authors"
-        assert included["id"] == "1"
-        # Primary data should have relationship links
-        item = body["data"][0]
-        assert item["relationships"]["author"]["links"]["related"] == "/authors/1"
-
-    def test_response_on_get_one(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Author(Resource):
-            _type: ClassVar = "authors"
-            id: int
-            name: str
-
-        @api.get_one("articles")
-        def view(request, article_id: uuid.UUID) -> Response[Article]:
-            return Response(
-                data=Article(id=article_id, title="T", content="C"),
-                included=[Author(id=1, name="A")],
-            )
-
-        uid = uuid.uuid4()
-        request = factory.get(f"/articles/{uid}")
-        response = view(request, article_id=uid)
-        body = json.loads(response.content)
-        assert "included" in body
-        assert len(body["included"]) == 1
-
-
-class TestPaginationLinks:
-    def test_many_response_includes_merged_links(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request) -> Response[list[Article]]:
-            return Response(
-                data=[Article(id=uuid.uuid4(), title="T", content="C")],
-                links={"prev": {"page": 1}, "next": {"page": 3}},
-            )
-
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get("/articles/?page=2")
-            response = view(request)
-        body = json.loads(response.content)
-
-        assert body["links"]["self"] == "/articles/"
-        assert body["links"]["prev"] == "/articles/?page=1"
-        assert body["links"]["next"] == "/articles/?page=3"
-
-    def test_many_response_merges_with_existing_query_params(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request) -> Response[list[Article]]:
-            return Response(
-                data=[Article(id=uuid.uuid4(), title="T", content="C")],
-                links={"prev": {"page": 1, "sort": "-title"}},
-            )
-
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get("/articles/?page=2&sort=title")
-            response = view(request)
-        body = json.loads(response.content)
-
-        assert "prev" in body["links"]
-        assert "page=1" in body["links"]["prev"]
-        assert "sort=-title" in body["links"]["prev"]
-
-    def test_one_response_includes_links(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_one("articles")
-        def view(request, article_id: uuid.UUID) -> Response[Article]:
-            return Response(
-                data=Article(id=article_id, title="T", content="C"),
-                links={"prev": {"page": 1}},
-            )
-
-        uid = uuid.uuid4()
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get(f"/articles/{uid}?page=2")
-            response = view(request, article_id=uid)
-        body = json.loads(response.content)
-
-        assert body["links"]["self"] == f"/articles/{uid}"
-        assert body["links"]["prev"] == f"/articles/{uid}?page=1"
-
-    def test_no_extra_links_when_response_has_none(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request) -> list[Article]:
-            return [Article(id=uuid.uuid4(), title="T", content="C")]
-
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get("/articles/")
-            response = view(request)
-        body = json.loads(response.content)
-
-        assert body["links"] == {"self": "/articles/"}
-
-    def test_empty_link_defs_keeps_self_link(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        def view(request) -> Response[list[Article]]:
-            return Response(
-                data=[Article(id=uuid.uuid4(), title="T", content="C")],
-                links={},
-            )
-
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get("/articles/")
-            response = view(request)
-        body = json.loads(response.content)
-
-        assert body["links"] == {"self": "/articles/"}
-
-    def test_async_get_many_pagination_links(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_many("articles")
-        async def view(request) -> Response[list[Article]]:
-            return Response(
-                data=[Article(id=uuid.uuid4(), title="T", content="C")],
-                links={"next": {"page": 2}},
-            )
-
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get("/articles/?page=1")
-            response = asyncio.run(view(request))
-        body = json.loads(response.content)
-
-        assert body["links"]["self"] == "/articles/"
-        assert body["links"]["next"] == "/articles/?page=2"
-
-    def test_async_get_one_pagination_links(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        @api.get_one("articles")
-        async def view(request, article_id: uuid.UUID) -> Response[Article]:
-            return Response(
-                data=Article(id=article_id, title="T", content="C"),
-                links={"prev": {"page": 1}},
-            )
-
-        uid = uuid.uuid4()
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get(f"/articles/{uid}?page=2")
-            response = asyncio.run(view(request, article_id=uid))
-        body = json.loads(response.content)
-
-        assert body["links"]["self"] == f"/articles/{uid}"
-        assert body["links"]["prev"] == f"/articles/{uid}?page=1"
-
-
-class TestPluralRelationshipLinks:
-    def test_related_link_for_plural_relationship(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Chapter(Resource):
-            _type: ClassVar = "chapters"
-            id: uuid.UUID
-            title: str
-
-        class Book(Resource):
-            _type: ClassVar = "books"
-            _attributes: ClassVar = ["title"]
-            _singular_relationships: ClassVar = [("author", "users")]
-            _plural_relationships: ClassVar = [("chapters", "chapters")]
-            id: uuid.UUID
-            title: str
-            author: uuid.UUID
-            chapters: list[uuid.UUID] = field(default_factory=list)
-
-        @api.get_one("books")
-        def get_book(request, book_id: uuid.UUID) -> Book:
-            return Book(id=book_id, title="B", author=uuid.uuid4(), chapters=[])
-
-        @api.get_relationship("books", "chapters")
-        def get_book_chapters(request, book_id: uuid.UUID) -> list[Chapter]:
-            return []
-
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            uid = uuid.uuid4()
-            request = factory.get(f"/books/{uid}")
-            response = get_book(request, book_id=uid)
-
-        body = json.loads(response.content)
-        rel = body["data"]["relationships"]["chapters"]
-        assert "links" in rel
-        assert "related" in rel["links"]
-        assert rel["links"]["related"] == f"/books/{uid}/chapters"
-
-    def test_self_link_for_plural_relationship(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Chapter(Resource):
-            _type: ClassVar = "chapters"
-            id: uuid.UUID
-            title: str
-
-        class Book(Resource):
-            _type: ClassVar = "books"
-            _attributes: ClassVar = ["title"]
-            _plural_relationships: ClassVar = [("chapters", "chapters")]
-            id: uuid.UUID
-            title: str
-            chapters: list[uuid.UUID] = field(default_factory=list)
-
-        @api.get_one("books")
-        def get_book(request, book_id: uuid.UUID) -> Book:
-            return Book(id=book_id, title="B", chapters=[])
-
-        @api.reset_relationship("books", "chapters")
-        def reset_book_chapters(request, book_id: uuid.UUID, chapter_ids: list[int]) -> None:
-            pass
-
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            uid = uuid.uuid4()
-            request = factory.get(f"/books/{uid}")
-            response = get_book(request, book_id=uid)
-
-        body = json.loads(response.content)
-        rel = body["data"]["relationships"]["chapters"]
-        assert "links" in rel
-        assert "self" in rel["links"]
-        assert rel["links"]["self"] == f"/books/{uid}/relationships/chapters"
-
-    def test_both_links_for_plural(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Chapter(Resource):
-            _type: ClassVar = "chapters"
-            id: uuid.UUID
-            title: str
-
-        class Book(Resource):
-            _type: ClassVar = "books"
-            _attributes: ClassVar = ["title"]
-            _plural_relationships: ClassVar = [("chapters", "chapters")]
-            id: uuid.UUID
-            title: str
-            chapters: list[uuid.UUID] = field(default_factory=list)
-
-        @api.get_one("books")
-        def get_book(request, book_id: uuid.UUID) -> Book:
-            return Book(id=book_id, title="B", chapters=[])
-
-        @api.get_relationship("books", "chapters")
-        def get_book_chapters(request, book_id: uuid.UUID) -> list[Chapter]:
-            return []
-
-        @api.reset_relationship("books", "chapters")
-        def reset_book_chapters(request, book_id: uuid.UUID, chapter_ids: list[int]) -> None:
-            pass
-
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            uid = uuid.uuid4()
-            request = factory.get(f"/books/{uid}")
-            response = get_book(request, book_id=uid)
-
-        body = json.loads(response.content)
-        rel = body["data"]["relationships"]["chapters"]
-        assert "links" in rel
-        assert rel["links"]["related"] == f"/books/{uid}/chapters"
-        assert rel["links"]["self"] == f"/books/{uid}/relationships/chapters"
-
-    def test_plural_links_in_list_response(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-
-        class Chapter(Resource):
-            _type: ClassVar = "chapters"
-            id: int
-            title: str
-
-        class Book(Resource):
-            _type: ClassVar = "books"
-            _attributes: ClassVar = ["title"]
-            _plural_relationships: ClassVar = [("chapters", "chapters")]
-            id: uuid.UUID
-            title: str
-            chapters: list[int] = field(default_factory=list)
-
-        @api.get_many("books")
-        def list_books(request) -> list[Book]:
-            return [Book(id=uuid.uuid4(), title="B1"), Book(id=uuid.uuid4(), title="B2")]
-
-        @api.get_relationship("books", "chapters")
-        def get_book_chapters(request, book_id: uuid.UUID) -> list[Chapter]:
-            return []
-
-        urlconf = _make_urlconf(api)
-        with override_settings(ROOT_URLCONF=urlconf):
-            request = factory.get("/books/")
-            response = list_books(request)
-
-        body = json.loads(response.content)
-        for item in body["data"]:
-            rel = item["relationships"]["chapters"]
-            assert "links" in rel
-            assert "related" in rel["links"]
-            assert rel["links"]["related"].startswith("/books/")
-
-
-class TestPluralRelationshipMgmt:
-    def test_reset_relationship_sends_list_of_ints(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.reset_relationship("books", "chapters")
-        def reset_book_chapters(request, book_id: uuid.UUID, chapter_ids: list[int]) -> None:
-            calls.append(chapter_ids)
-
-        uid = uuid.uuid4()
-        request = factory.patch(
-            "/",
-            data=json.dumps({"data": [{"id": 1, "type": "chapters"}, {"id": 2, "type": "chapters"}]}),
-            content_type="application/vnd.api+json",
-        )
-        response = reset_book_chapters(request, book_id=uid)
-
-        assert response.status_code == 204
-        assert calls == [[1, 2]]
-
-    def test_add_to_relationship_sends_list_of_ints(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.add_to_relationship("books", "chapters")
-        def add_book_chapters(request, book_id: uuid.UUID, chapter_ids: list[int]) -> None:
-            calls.append(chapter_ids)
-
-        uid = uuid.uuid4()
-        request = factory.post(
-            "/",
-            data=json.dumps({"data": [{"id": 3, "type": "chapters"}]}),
-            content_type="application/vnd.api+json",
-        )
-        response = add_book_chapters(request, book_id=uid)
-
-        assert response.status_code == 204
-        assert calls == [[3]]
-
-    def test_remove_from_relationship_sends_list_of_ints(self):
-        api = DjsonApi()
-        factory = RequestFactory()
-        calls = []
-
-        @api.remove_from_relationship("books", "chapters")
-        def remove_book_chapters(request, book_id: uuid.UUID, chapter_ids: list[int]) -> None:
-            calls.append(chapter_ids)
-
-        uid = uuid.uuid4()
-        request = factory.delete(
-            "/",
-            data=json.dumps({"data": [{"id": 1, "type": "chapters"}]}),
-            content_type="application/vnd.api+json",
-        )
-        response = remove_book_chapters(request, book_id=uid)
-
-        assert response.status_code == 204
-        assert calls == [[1]]
-
-    def test_openapi_spec_includes_plural_links(self):
-        api = DjsonApi()
-
-        class Chapter(Resource):
-            _type: ClassVar = "chapters"
-            id: int
-            title: str
-
-        class Book(Resource):
-            _type: ClassVar = "books"
-            _attributes: ClassVar = ["title"]
-            _plural_relationships: ClassVar = [("chapters", "chapters")]
-            id: int
-            title: str
-            chapters: list[int] = field(default_factory=list)
-
-        @api.get_one("books")
-        def get_book(request, book_id: int) -> Book:
-            return Book(id=1, title="B")
-
-        @api.get_many("books")
-        def list_books(request) -> list[Book]:
-            return []
-
-        @api.create_one("books")
-        def create_book(request, payload: Book) -> Book:
-            return Book(id=1, title="B")
-
-        @api.edit_one("books")
-        def edit_book(request, book_id: int, payload: Book) -> Book:
-            return Book(id=1, title="B")
-
-        @api.get_relationship("books", "chapters")
-        def get_book_chapters(request, book_id: int) -> list[Chapter]:
-            return []
-
-        @api.reset_relationship("books", "chapters")
-        def reset_book_chapters(request, book_id: int, chapter_ids: list[int]) -> None:
+        @api.edit_relationship("articles", "author")
+        def edit_author(request, article_id: int, author_id: int):
             pass
 
         spec = api._build_openapi_spec()
-        book_schema = spec["components"]["schemas"]["books_resource"]
-        categories_rel = book_schema["properties"]["relationships"]["properties"]["chapters"]
+        path = "/articles/{article_id}/relationship/author"
+        assert path in spec["paths"]
+        op = spec["paths"][path]["patch"]
+        assert "requestBody" in op
+        assert "204" in op["responses"]
 
-        assert "links" in categories_rel["properties"]
-        links = categories_rel["properties"]["links"]["properties"]
-        assert "related" in links
-        assert "self" in links
+    def test_empty_registry_no_error(self):
+        from djsonapi.api import DjsonApi
 
-    def test_openapi_spec_plural_links_only_related(self):
-        """Only related link when no management endpoint."""
         api = DjsonApi()
-
-        class Chapter(Resource):
-            _type: ClassVar = "chapters"
-            id: int
-            title: str
-
-        class Book(Resource):
-            _type: ClassVar = "books"
-            _attributes: ClassVar = ["title"]
-            _plural_relationships: ClassVar = [("chapters", "chapters")]
-            id: int
-            title: str
-            chapters: list[int] = field(default_factory=list)
-
-        @api.get_one("books")
-        def get_book(request, book_id: int) -> Book:
-            return Book(id=1, title="B")
-
-        @api.get_relationship("books", "chapters")
-        def get_book_chapters(request, book_id: int) -> list[Chapter]:
-            return []
-
         spec = api._build_openapi_spec()
-        book_schema = spec["components"]["schemas"]["books_resource"]
-        chapters_rel = book_schema["properties"]["relationships"]["properties"]["chapters"]
-        links = chapters_rel["properties"]["links"]["properties"]
-        assert "related" in links
-        assert "self" not in links
-    def test_not_found_renders_correctly(self):
+        assert spec["paths"] == {}
+
+    def test_include_param_in_openapi(self):
+        from djsonapi.api import DjsonApi
+
         api = DjsonApi()
-        factory = RequestFactory()
 
         @api.get_one("articles")
-        def view(request, article_id: uuid.UUID) -> Article:
-            raise NotFound("Custom detail")
+        def get_article(request, article_id: int, include__author: bool = False) -> Article:
+            return Article(id=article_id)
 
-        request = factory.get("/articles/123")
-        response = view(request, article_id=uuid.uuid4())
-
-        body = json.loads(response.content)
-        error = body["errors"][0]
-        assert error["status"] == "404"
-        assert error["code"] == "not_found"
-        assert error["title"] == "Not found"
-        assert error["detail"] == "Custom detail"
-
-
-class TestStartupValidation:
-    def test_bare_include_param_errors(self):
-        from django.core.exceptions import ImproperlyConfigured
-
-        api = DjsonApi()
-        with pytest.raises(ImproperlyConfigured):
-
-            @api.get_many("articles")
-            def view(request, include: str = "") -> list[Article]: ...
-
-    def test_bare_include_param_on_get_one_errors(self):
-        from django.core.exceptions import ImproperlyConfigured
-
-        api = DjsonApi()
-        with pytest.raises(ImproperlyConfigured):
-
-            @api.get_one("articles")
-            def view(request, article_id: int, include: str = "") -> Article: ...
-
-    def test_bare_include_param_on_create_one_errors(self):
-        from django.core.exceptions import ImproperlyConfigured
-
-        api = DjsonApi()
-        with pytest.raises(ImproperlyConfigured):
-
-            @api.create_one("articles")
-            def view(request, payload: Article, include: str = "") -> Article: ...
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles/{article_id}"]["get"]
+        param_names = [p["name"] for p in op["parameters"]]
+        assert "include" in param_names

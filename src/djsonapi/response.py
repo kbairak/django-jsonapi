@@ -28,5 +28,5 @@ class Response[T]:
             result["included"] = [item.serialize() for item in self.included]
         for key, value in (self.links or {}).items():
             parameters = {**request.GET.dict(), **value}
-            result[key] = f"{request.path}?{urlencode(parameters)}"
+            result.setdefault("links", {})[key] = f"{request.path}?{urlencode(parameters)}"
         return result
