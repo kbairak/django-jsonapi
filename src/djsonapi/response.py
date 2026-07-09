@@ -13,6 +13,7 @@ class Response[T]:
     data: T | None = None
     included: Sequence[Resource] | None = None
     links: dict[str, dict[str, str | int]] | None = None
+    status: int = 200
 
     def serialize(self, request: HttpRequest) -> dict[str, Any]:
         result: dict[str, Any] = {"links": {"self": request.get_full_path()}}

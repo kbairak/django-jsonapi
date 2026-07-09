@@ -1,4 +1,3 @@
-# from .views import api
-from .views2 import api2
+from .views import api
 
-urlpatterns = api2.urls
+urlpatterns = api.urls

@@ -1,14 +1,18 @@
 import functools
 import inspect
+import json
 import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Sequence, get_args, get_origin
 from uuid import UUID
 
-from django.http import HttpRequest, JsonResponse
+import jsonschema  # type: ignore
+from django.core.exceptions import ImproperlyConfigured
+from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.urls import NoReverseMatch, URLPattern, reverse
 from django.urls import path as django_path
+from django.views.decorators.csrf import csrf_exempt
 
 from djsonapi.exceptions import (
     BadRequest,
@@ -21,8 +25,6 @@ from djsonapi.exceptions import (
 from djsonapi.resource import Resource
 from djsonapi.response import Response
 
-# _VALID_PREFIXES = ["filter__", "page", "sort", "include__", "fields__", "extra__"]
-
 
 @dataclass
 class Endpoint:
@@ -32,6 +34,10 @@ class Endpoint:
 
     METHOD = ""
     URL_NAME_TEMPLATE = ""
+    SUCCESS_STATUS: ClassVar[int] = 200
+
+    def __post_init__(self):
+        pass
 
     @property
     def url_name(self) -> str:
@@ -59,17 +65,6 @@ class Endpoint:
 
     @functools.cached_property
     def expected_extra(self) -> list[inspect.Parameter]:
-        """Extra parameters that the handler function expects
-
-        >>> @api.get_many("articles")
-        ... def get_articles(
-        ...     request: HttpRequest, extra__details: bool = False, extra__async: bool = False
-        ... ) -> list[ArticleResource]: ...
-
-        >>> get_articles.expected_extra
-        <<< [inspect.Parameter(..), inspect.Parameter(..)]
-        """
-
         return [
             parameter
             for parameter in self.smart_parameters
@@ -78,12 +73,10 @@ class Endpoint:
 
     @functools.cached_property
     def return_resource_type(self):
-        """Extract Resource subclass from return type annotation
+        """Infer Resource subclass from handler return annotation.
 
-        - `-> ResourceSubclass` returns `ResourceSubclass`
-        - `-> Response[ResourceSubclass]` returns `ResourceSubclass`
-        - `-> Response[list[ResourceSubclass]]` returns `ResourceSubclass`
-        - Otherwise returns None
+        Handles bare Resource, Response[Resource], Response[list[Resource]].
+        Returns None if no Resource type found.
         """
 
         if isinstance(self.return_annotation, type) and issubclass(
@@ -106,9 +99,137 @@ class Endpoint:
                 return iargs[0]
         return None
 
+    def view(self, request: HttpRequest, **url_kwargs: Any) -> Any:
+        remaining_params = request.GET.dict()
+        kwargs, errors = self._get_kwargs(request, url_kwargs, remaining_params)
+        if remaining_params:
+            errors.append(
+                BadRequest(f"Unknown query parameters: {', '.join(sorted(remaining_params))}")
+            )
+        for param in self.smart_parameters:
+            if param.default is inspect.Parameter.empty and param.name not in kwargs:
+                errors.append(InternalServerError(f"Missing required parameter: {param.name}"))
+        if errors:
+            raise DjsonApiExceptionMulti(*errors)
+        result = self.handler(request, **kwargs)
+        if not isinstance(result, Response):
+            result = Response(data=result)
+        return self._postprocess(result, request)
+
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
+        return {}, []
+
+    def _postprocess(self, response: Response, request: HttpRequest) -> Any:
+        if self.SUCCESS_STATUS == 204:
+            return HttpResponse(status=204)
+        response.status = self.SUCCESS_STATUS
+        return response
+
+
+class ExpectsIdMixin(Endpoint):
+    parameters: ClassVar[list[inspect.Parameter]]
+    type_name: ClassVar[str]
+
+    @functools.cached_property
+    def pk_name(self):
+        return self.parameters[1].name
+
+    @functools.cached_property
+    def pk_type(self):
+        param = self.parameters[1]
+        return param.annotation if param.annotation != inspect.Parameter.empty else str
+
+    @functools.cached_property
+    def url(self):
+        path_type = {UUID: "uuid", int: "int", str: "str"}[self.pk_type]
+        return f"{self.type_name}/<{path_type}:{self.pk_name}>"
+
+    @functools.cached_property
+    def smart_parameters(self) -> list[inspect.Parameter]:
+        return self.parameters[2:]
+
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
+        kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params)
+        if self.pk_name not in url_kwargs:
+            return kwargs, errors
+        raw = url_kwargs[self.pk_name]
+        try:
+            pk_value = self.pk_type(raw)
+        except Exception:
+            raise NotFound("The URL does not exist")
+        kwargs[self.pk_name] = pk_value
+        return kwargs, errors
+
 
 @dataclass(kw_only=True)
-class ReturnsDataMixin:
+class ExpectsPayloadMixin(Endpoint):
+    def __post_init__(self):
+        super().__post_init__()
+        if not (
+            isinstance(self.payload_parameter.annotation, type)
+            and issubclass(self.payload_parameter.annotation, Resource)
+        ):
+            raise ValueError(
+                f"First smart parameter '{self.payload_parameter.name}' must be a Resource subclass, "
+                f"got {self.payload_parameter.annotation}"
+            )
+
+    @functools.cached_property
+    def payload_parameter(self) -> inspect.Parameter:
+        return self.smart_parameters[0]
+
+    def _get_payload_schema_fn(self, resource_class: type[Resource]):
+        raise NotImplementedError
+
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
+        kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params)
+        payload, parse_errors = self._parse_body(request)
+        if parse_errors:
+            errors.extend(parse_errors)
+        else:
+            kwargs[self.payload_parameter.name] = payload
+        return kwargs, errors
+
+    def _parse_body(
+        self, request: HttpRequest
+    ) -> tuple[Any | None, list[DjsonApiExceptionSingle]]:
+        try:
+            body = json.loads(request.body)
+        except json.JSONDecodeError as e:
+            return None, [BadRequest(f"Invalid JSON: {e}")]
+
+        resource_class = self.payload_parameter.annotation
+        if not (isinstance(resource_class, type) and issubclass(resource_class, Resource)):
+            return None, [BadRequest("Could not determine resource type")]
+
+        schema_fn = self._get_payload_schema_fn(resource_class)
+        if schema_fn:
+            try:
+                jsonschema.validate(body.get("data", body), schema_fn())
+            except jsonschema.ValidationError as e:
+                return None, [BadRequest(str(e))]
+
+        payload = resource_class._from_jsonapi_payload(body)
+        return payload, []
+
+
+@dataclass(kw_only=True)
+class ReturnsDataMixin(ExpectsIdMixin):
     return_annotation: ClassVar
     smart_parameters: ClassVar[Sequence[inspect.Parameter]]
     return_resource_type: ClassVar[type[Resource] | None]
@@ -118,6 +239,7 @@ class ReturnsDataMixin:
     include_types: Sequence[type[Resource]] = field(default_factory=list)
 
     def __post_init__(self):
+        super().__post_init__()
         if forbidden_includes := self.expected_includes - self.allowed_includes:
             raise ValueError(f"Invalid include types: {forbidden_includes}")
         if forbidden_sparse_types := self.expected_sparse - self.allowed_sparse.keys():
@@ -219,52 +341,36 @@ class ReturnsDataMixin:
             *[rel for rel, _ in self.return_resource_type._plural_relationships],
         }
 
-    def extract_kwargs(
-        self, query_parameters
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
     ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
-        request_includes = {
-            relationship
-            for relationship in query_parameters.get("include", "").split(",")
-            if relationship
-        }
-        request_sparse = {
-            m.groups()[0]: {_field for _field in value.split(",") if _field}
-            for key, value in query_parameters.items()
-            if (m := re.search(r"^fields\[(\w+)\]$", key))
-        }
+        kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params or {})
 
-        errors: list[DjsonApiExceptionSingle] = []
-        kwargs: dict[str, Any] = {}
-
+        request_includes = {r for r in (remaining_params or {}).pop("include", "").split(",") if r}
         if forbidden_includes := request_includes - self.expected_includes:
             errors.append(BadRequest(f"Invalid include types: {forbidden_includes}"))
-        for include_relationship in request_includes:
-            kwargs[f"include__{include_relationship}"] = True
-        try:
-            del query_parameters["include"]
-        except KeyError:
-            pass
+        for inc in request_includes:
+            kwargs[f"include__{inc}"] = True
 
+        request_sparse: dict[str, set[str]] = {}
+        for key in list(remaining_params or {}):
+            if m := re.search(r"^fields\[(\w+)\]$", key):
+                request_sparse[m.group(1)] = {
+                    f.strip() for f in (remaining_params or {}).pop(key).split(",") if f.strip()
+                }
         if forbidden_sparse_types := request_sparse.keys() - self.allowed_sparse.keys():
             errors.append(BadRequest(f"Invalid fields types: {forbidden_sparse_types}"))
-        for sparse_type in request_sparse.keys():
-            if forbidden_sparse_fields := (
-                request_sparse[sparse_type] - self.allowed_sparse[sparse_type]
-            ):
-                errors.append(
-                    BadRequest(
-                        f"Invalid fields for type '{sparse_type}': {forbidden_sparse_fields}"
-                    )
-                )
-            elif sparse_type in self.expected_sparse:
-                kwargs[f"fields__{sparse_type}"] = request_sparse[sparse_type]
+        for sparse_type, fields in request_sparse.items():
+            if sparse_type in self.expected_sparse:
+                kwargs[f"fields__{sparse_type}"] = fields
 
-        for key in request_sparse:
-            del query_parameters[f"fields[{key}]"]
-
+        expected_extra_names = {p.name[len("extra__") :] for p in self.expected_extra}
         for param in self.expected_extra:
             extra_name = param.name[len("extra__") :]
-            raw = query_parameters.pop(extra_name, None)
+            raw = (remaining_params or {}).pop(extra_name, None)
             if raw is not None:
                 tp = param.annotation if param.annotation != inspect.Parameter.empty else str
                 try:
@@ -278,28 +384,61 @@ class ReturnsDataMixin:
 
         return kwargs, errors
 
+    def _postprocess(self, response: Response, request: HttpRequest) -> dict[str, Any]:
+        data = response.serialize(request)
+        data.setdefault("links", {})["self"] = request.get_full_path()
+        return data
 
-class ExpectsIdMixin:
-    parameters: ClassVar[list[inspect.Parameter]]
-    type_name: ClassVar[str]
 
-    @functools.cached_property
-    def pk_name(self):
-        return self.parameters[1].name
-
-    @functools.cached_property
-    def pk_type(self):
-        param = self.parameters[1]
-        return param.annotation if param.annotation != inspect.Parameter.empty else str
+@dataclass(kw_only=True)
+class ExpectsRelationshipIdsMixin(Endpoint):
+    def __post_init__(self):
+        super().__post_init__()
 
     @functools.cached_property
-    def url(self):
-        path_type = {UUID: "uuid", int: "int", str: "str"}[self.pk_type]
-        return f"{self.type_name}/<{path_type}:{self.pk_name}>"
+    def ids_parameter(self) -> inspect.Parameter:
+        return self.smart_parameters[0]
 
-    @functools.cached_property
-    def smart_parameters(self) -> list[inspect.Parameter]:
-        return self.parameters[2:]
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
+        kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params)
+
+        try:
+            body = json.loads(request.body)
+        except json.JSONDecodeError as e:
+            return kwargs, errors + [BadRequest(f"Invalid JSON: {e}")]
+
+        raw = body.get("data")
+        if raw is None:
+            return kwargs, errors + [BadRequest("Missing 'data' in request body")]
+
+        annotation = self.ids_parameter.annotation
+        plural = getattr(annotation, "__origin__", None) is list
+
+        if plural:
+            if not isinstance(raw, list):
+                return kwargs, errors + [
+                    BadRequest("Expected array of resource identifier objects")
+                ]
+            inner_type = get_args(annotation)[0] if get_args(annotation) else str
+            try:
+                kwargs[self.ids_parameter.name] = [inner_type(item["id"]) for item in raw]
+            except (KeyError, TypeError, ValueError) as e:
+                return kwargs, errors + [BadRequest(f"Invalid resource identifier: {e}")]
+        else:
+            item_type = annotation if annotation is not inspect.Parameter.empty else str
+            if not isinstance(raw, dict):
+                return kwargs, errors + [BadRequest("Expected single resource identifier object")]
+            try:
+                kwargs[self.ids_parameter.name] = item_type(raw["id"])
+            except (KeyError, TypeError, ValueError) as e:
+                return kwargs, errors + [BadRequest(f"Invalid resource identifier: {e}")]
+
+        return kwargs, errors
 
 
 @dataclass(kw_only=True)
@@ -316,8 +455,9 @@ class ExpectsRelationshipMixin(ExpectsIdMixin):
 
     @functools.cached_property
     def url(self):
+        path_type = {UUID: "uuid", int: "int", str: "str"}[self.pk_type]
         return (
-            f"{self.type_name}/<{self.pk_type}:{self.pk_name}>"
+            f"{self.type_name}/<{path_type}:{self.pk_name}>"
             f"/relationship/{self.relationship_name}"
         )
 
@@ -327,38 +467,21 @@ class GetOneEndpoint(ReturnsDataMixin, ExpectsIdMixin, Endpoint):
     METHOD = "GET"
     URL_NAME_TEMPLATE = "{type_name}__item"
 
-    def view(self, request: HttpRequest, **url_kwargs: Any):
-        obj_id = url_kwargs[self.pk_name]
-        try:
-            obj_id = self.pk_type(obj_id)
-        except Exception:
-            raise NotFound(f"The URL '{request.path}' does not exist")
-
-        query_parameters = request.GET.dict()
-        kwargs, errors = self.extract_kwargs(query_parameters)
-
-        if query_parameters:
-            errors.append(BadRequest(f"Unknown query parameters: {', '.join(query_parameters)}"))
-
-        if errors:
-            raise DjsonApiExceptionMulti(*errors)
-
-        response = self.handler(request, obj_id, **kwargs)
-        if not isinstance(response, Response):
-            response = Response(data=response)
-        return response
-
 
 @dataclass
-class EditOneEndpoint(ReturnsDataMixin, ExpectsIdMixin, Endpoint):
+class EditOneEndpoint(ReturnsDataMixin, ExpectsIdMixin, ExpectsPayloadMixin, Endpoint):
     METHOD = "PATCH"
     URL_NAME_TEMPLATE = "{type_name}__item"
+
+    def _get_payload_schema_fn(self, resource_class: type[Resource]):
+        return resource_class.jsonschema_edit
 
 
 @dataclass
 class DeleteOneEndpoint(ExpectsIdMixin, Endpoint):
     METHOD = "DELETE"
     URL_NAME_TEMPLATE = "{type_name}__item"
+    SUCCESS_STATUS: ClassVar[int] = 204
 
 
 @dataclass
@@ -366,11 +489,75 @@ class GetManyEndpoint(ReturnsDataMixin, Endpoint):
     METHOD = "GET"
     URL_NAME_TEMPLATE = "{type_name}__collection"
 
+    @functools.cached_property
+    def smart_parameters(self) -> list[inspect.Parameter]:
+        return self.parameters[1:]
+
+    @functools.cached_property
+    def url(self):
+        return f"{self.type_name}"
+
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
+        kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params or {})
+        rp = remaining_params or {}
+
+        for param in self.smart_parameters:
+            if param.name in ("sort", "page"):
+                raw = rp.pop(param.name, None)
+                if raw is not None:
+                    if param.name == "page":
+                        try:
+                            kwargs[param.name] = int(raw)
+                        except ValueError:
+                            errors.append(BadRequest("page must be an integer"))
+                    else:
+                        origin = getattr(param.annotation, "__origin__", None)
+                        if origin is list or origin is Sequence:
+                            kwargs[param.name] = [s.strip() for s in raw.split(",") if s.strip()]
+                        else:
+                            kwargs[param.name] = raw
+                elif param.default is inspect.Parameter.empty:
+                    errors.append(BadRequest(f"Missing required parameter: {param.name}"))
+                else:
+                    kwargs[param.name] = param.default
+            elif param.name.startswith("filter__"):
+                filter_key = param.name[len("filter__") :]
+                raw = rp.pop(filter_key, None)
+                if raw is not None:
+                    tp = param.annotation if param.annotation != inspect.Parameter.empty else str
+                    try:
+                        kwargs[param.name] = tp(raw)
+                    except ValueError as e:
+                        errors.append(BadRequest(str(e)))
+                elif param.default is inspect.Parameter.empty:
+                    errors.append(BadRequest(f"Missing required parameter: {param.name}"))
+                else:
+                    kwargs[param.name] = param.default
+
+        return kwargs, errors
+
 
 @dataclass
-class CreateOneEndpoint(ReturnsDataMixin, Endpoint):
+class CreateOneEndpoint(ReturnsDataMixin, ExpectsPayloadMixin, Endpoint):
     METHOD = "POST"
     URL_NAME_TEMPLATE = "{type_name}__collection"
+    SUCCESS_STATUS: ClassVar[int] = 201
+
+    @functools.cached_property
+    def smart_parameters(self) -> list[inspect.Parameter]:
+        return self.parameters[1:]
+
+    @functools.cached_property
+    def url(self):
+        return f"{self.type_name}"
+
+    def _get_payload_schema_fn(self, resource_class: type[Resource]):
+        return resource_class.jsonschema_create
 
 
 @dataclass
@@ -380,31 +567,38 @@ class GetRelationshipEndpoint(ReturnsDataMixin, ExpectsRelationshipMixin, Endpoi
 
     @functools.cached_property
     def url(self):
-        return f"{self.type_name}/<{self.pk_type}:{self.pk_name}>/{self.relationship_name}"
+        path_type = {UUID: "uuid", int: "int", str: "str"}[self.pk_type]
+        return f"{self.type_name}/<{path_type}:{self.pk_name}>/{self.relationship_name}"
 
 
 @dataclass
-class EditRelationshipEndpoint(ExpectsRelationshipMixin, Endpoint):
+class EditRelationshipEndpoint(ExpectsRelationshipMixin, ExpectsRelationshipIdsMixin, Endpoint):
     METHOD = "PATCH"
     URL_NAME_TEMPLATE = "{type_name}__{relationship_name}__relationship"
+    SUCCESS_STATUS: ClassVar[int] = 204
 
 
 @dataclass
-class ResetRelationshipEndpoint(ExpectsRelationshipMixin, Endpoint):
+class ResetRelationshipEndpoint(ExpectsRelationshipMixin, ExpectsRelationshipIdsMixin, Endpoint):
     METHOD = "PATCH"
     URL_NAME_TEMPLATE = "{type_name}__{relationship_name}__relationship"
+    SUCCESS_STATUS: ClassVar[int] = 204
 
 
 @dataclass
-class AddToRelationshipEndpoint(ExpectsRelationshipMixin, Endpoint):
+class AddToRelationshipEndpoint(ExpectsRelationshipMixin, ExpectsRelationshipIdsMixin, Endpoint):
     METHOD = "POST"
     URL_NAME_TEMPLATE = "{type_name}__{relationship_name}__relationship"
+    SUCCESS_STATUS: ClassVar[int] = 204
 
 
 @dataclass
-class RemoveFromRelationshipEndpoint(ExpectsRelationshipMixin, Endpoint):
+class RemoveFromRelationshipEndpoint(
+    ExpectsRelationshipMixin, ExpectsRelationshipIdsMixin, Endpoint
+):
     METHOD = "DELETE"
     URL_NAME_TEMPLATE = "{type_name}__{relationship_name}__relationship"
+    SUCCESS_STATUS: ClassVar[int] = 204
 
 
 @dataclass
@@ -597,6 +791,7 @@ class DjsonApi:
     def combine_views(self, endpoints: list[Endpoint]) -> Callable[..., Any]:
         by_method: dict[str, Endpoint] = {endpoint.METHOD: endpoint for endpoint in endpoints}
 
+        @csrf_exempt
         def view(request: HttpRequest, *args, **kwargs):
             try:
                 if request.method not in by_method:
@@ -605,7 +800,7 @@ class DjsonApi:
                         f"allowed methods: {', '.join(by_method.keys())}"
                     )
                 endpoint = by_method[request.method]
-                response = endpoint.view(request, *args, **kwargs)
+                result = endpoint.view(request, *args, **kwargs)
             except DjsonApiExceptionSingle as exc:
                 return JsonResponse({"errors": exc.render()}, status=exc.status)
             except Exception:
@@ -613,23 +808,25 @@ class DjsonApi:
                 exc = InternalServerError()
                 return JsonResponse({"errors": exc.render()}, status=exc.status)
 
-            if isinstance(response, Response):
-                response = response.serialize(request)
-
-            response.setdefault("links", {})["self"] = request.get_full_path()
-            if isinstance(response["data"], list):
-                for item in response["data"]:
+            if isinstance(result, dict):
+                result.setdefault("links", {})["self"] = request.get_full_path()
+                if isinstance(result.get("data"), list):
+                    for item in result["data"]:
+                        self._fill_resource_links(item)
+                        self._filter_out_sparse(item, request)
+                else:
+                    self._fill_resource_links(result["data"])
+                    self._filter_out_sparse(result["data"], request)
+                for item in result.get("included", []):
                     self._fill_resource_links(item)
                     self._filter_out_sparse(item, request)
-            else:
-                self._fill_resource_links(response["data"])
-                self._filter_out_sparse(response["data"], request)
+                return JsonResponse(result, status=endpoint.SUCCESS_STATUS)
 
-            for item in response.get("included", []):
-                self._fill_resource_links(item)
-                self._filter_out_sparse(item, request)
+            if isinstance(result, Response):
+                data = result.serialize(request)
+                return JsonResponse(data, status=result.status or endpoint.SUCCESS_STATUS)
 
-            return JsonResponse(response, status=200)
+            return result
 
         return view
 
@@ -639,7 +836,7 @@ class DjsonApi:
 
         try:
             self_link = reverse(f"{_type}__item", args=(_id,))
-        except NoReverseMatch:
+        except (NoReverseMatch, ImproperlyConfigured):
             pass
         else:
             resource.setdefault("links", {})["self"] = self_link
@@ -654,15 +851,15 @@ class DjsonApi:
             else:
                 try:
                     related_link = reverse(f"{relationship_type}__item", args=(relationship_id,))
-                except NoReverseMatch:
+                except (NoReverseMatch, ImproperlyConfigured):
                     pass
             try:
                 related_link = reverse(f"{_type}__{relationship_name}__related", args=(_id,))
-            except NoReverseMatch:
+            except (NoReverseMatch, ImproperlyConfigured):
                 pass
             try:
                 related_link = reverse(f"{_type}__{relationship_name}__related", args=(_id,))
-            except NoReverseMatch:
+            except (NoReverseMatch, ImproperlyConfigured):
                 pass
 
             if related_link:
@@ -672,7 +869,7 @@ class DjsonApi:
                 relationship_link = reverse(
                     f"{_type}__{relationship_name}__relationship", args=(_id,)
                 )
-            except NoReverseMatch:
+            except (NoReverseMatch, ImproperlyConfigured):
                 pass
             else:
                 relationship.setdefault("links", {})["self"] = relationship_link
