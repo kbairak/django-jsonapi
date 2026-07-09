@@ -1,5 +1,6 @@
 import functools
 import inspect
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Sequence, get_args, get_origin
@@ -38,7 +39,7 @@ class Endpoint:
 
     @functools.cached_property
     def url(self):
-        return f"/{self.type_name}"
+        return f"{self.type_name}"
 
     @functools.cached_property
     def signature(self) -> inspect.Signature:
@@ -255,7 +256,7 @@ class ReturnsDataMixin:
                         f"Invalid fields for type '{sparse_type}': {forbidden_sparse_fields}"
                     )
                 )
-            else:
+            elif sparse_type in self.expected_sparse:
                 kwargs[f"fields__{sparse_type}"] = request_sparse[sparse_type]
 
         for key in request_sparse:
@@ -284,17 +285,17 @@ class ExpectsIdMixin:
 
     @functools.cached_property
     def pk_name(self):
-        return self.parameters[0].name
+        return self.parameters[1].name
 
     @functools.cached_property
     def pk_type(self):
-        param = self.parameters[0]
+        param = self.parameters[1]
         return param.annotation if param.annotation != inspect.Parameter.empty else str
 
     @functools.cached_property
     def url(self):
         path_type = {UUID: "uuid", int: "int", str: "str"}[self.pk_type]
-        return f"/{self.type_name}/<{path_type}:{self.pk_name}>"
+        return f"{self.type_name}/<{path_type}:{self.pk_name}>"
 
     @functools.cached_property
     def smart_parameters(self) -> list[inspect.Parameter]:
@@ -316,7 +317,7 @@ class ExpectsRelationshipMixin(ExpectsIdMixin):
     @functools.cached_property
     def url(self):
         return (
-            f"/{self.type_name}/<{self.pk_type}:{self.pk_name}>"
+            f"{self.type_name}/<{self.pk_type}:{self.pk_name}>"
             f"/relationship/{self.relationship_name}"
         )
 
@@ -326,12 +327,11 @@ class GetOneEndpoint(ReturnsDataMixin, ExpectsIdMixin, Endpoint):
     METHOD = "GET"
     URL_NAME_TEMPLATE = "{type_name}__item"
 
-    def view(self, request: HttpRequest, obj_id: Any):
-        # Convert id to its proper type
+    def view(self, request: HttpRequest, **url_kwargs: Any):
+        obj_id = url_kwargs[self.pk_name]
         try:
             obj_id = self.pk_type(obj_id)
         except Exception:
-            # This shouldn't happen, Django itself should have validated this
             raise NotFound(f"The URL '{request.path}' does not exist")
 
         query_parameters = request.GET.dict()
@@ -380,7 +380,7 @@ class GetRelationshipEndpoint(ReturnsDataMixin, ExpectsRelationshipMixin, Endpoi
 
     @functools.cached_property
     def url(self):
-        return f"/{self.type_name}/<{self.pk_type}:{self.pk_name}>/{self.relationship_name}"
+        return f"{self.type_name}/<{self.pk_type}:{self.pk_name}>/{self.relationship_name}"
 
 
 @dataclass
@@ -604,12 +604,14 @@ class DjsonApi:
                         f"Method {request.method} not allowed for this endpoint, "
                         f"allowed methods: {', '.join(by_method.keys())}"
                     )
-                response = by_method[request.method].view(request, *args, **kwargs)
+                endpoint = by_method[request.method]
+                response = endpoint.view(request, *args, **kwargs)
             except DjsonApiExceptionSingle as exc:
-                return JsonResponse(exc.render(), status=exc.status)
+                return JsonResponse({"errors": exc.render()}, status=exc.status)
             except Exception:
+                logging.exception("Unhandled exception in djsonapi endpoint")
                 exc = InternalServerError()
-                return JsonResponse(exc.render(), status=exc.status)
+                return JsonResponse({"errors": exc.render()}, status=exc.status)
 
             if isinstance(response, Response):
                 response = response.serialize(request)
@@ -618,11 +620,14 @@ class DjsonApi:
             if isinstance(response["data"], list):
                 for item in response["data"]:
                     self._fill_resource_links(item)
+                    self._filter_out_sparse(item, request)
             else:
                 self._fill_resource_links(response["data"])
+                self._filter_out_sparse(response["data"], request)
 
             for item in response.get("included", []):
                 self._fill_resource_links(item)
+                self._filter_out_sparse(item, request)
 
             return JsonResponse(response, status=200)
 
@@ -633,7 +638,7 @@ class DjsonApi:
         _id = resource.get("id")
 
         try:
-            self_link = reverse(f"{_type}__item", kwargs={"id": _id})
+            self_link = reverse(f"{_type}__item", args=(_id,))
         except NoReverseMatch:
             pass
         else:
@@ -648,21 +653,15 @@ class DjsonApi:
                 pass
             else:
                 try:
-                    related_link = reverse(
-                        f"{relationship_type}__item", kwargs={"id": relationship_id}
-                    )
+                    related_link = reverse(f"{relationship_type}__item", args=(relationship_id,))
                 except NoReverseMatch:
                     pass
             try:
-                related_link = reverse(
-                    f"{_type}__{relationship_name}__related", kwargs={"id": _id}
-                )
+                related_link = reverse(f"{_type}__{relationship_name}__related", args=(_id,))
             except NoReverseMatch:
                 pass
             try:
-                related_link = reverse(
-                    f"{_type}__{relationship_name}__related", kwargs={"id": _id}
-                )
+                related_link = reverse(f"{_type}__{relationship_name}__related", args=(_id,))
             except NoReverseMatch:
                 pass
 
@@ -671,9 +670,37 @@ class DjsonApi:
 
             try:
                 relationship_link = reverse(
-                    f"{_type}__{relationship_name}__relationship", kwargs={"id": _id}
+                    f"{_type}__{relationship_name}__relationship", args=(_id,)
                 )
             except NoReverseMatch:
                 pass
             else:
                 relationship.setdefault("links", {})["self"] = relationship_link
+
+    def _filter_out_sparse(self, resource: dict[str, Any], request: HttpRequest) -> None:
+        _type = resource.get("type")
+        if not _type:
+            return
+
+        allowed_fields: set[str] | None = None
+        for key in request.GET.keys():
+            if (m := re.search(r"^fields\[(\w+)\]$", key)) and m.group(1) == _type:
+                raw = request.GET.get(key, "")
+                allowed_fields = {f.strip() for f in raw.split(",") if f.strip()}
+                break
+
+        if allowed_fields is None:
+            return
+
+        if "attributes" in resource:
+            resource["attributes"] = {
+                k: v for k, v in resource["attributes"].items() if k in allowed_fields
+            }
+        if "relationships" in resource:
+            resource["relationships"] = {
+                k: v for k, v in resource["relationships"].items() if k in allowed_fields
+            }
+        if len(resource.get("attributes", {})) == 0:
+            resource.pop("attributes", None)
+        if len(resource.get("relationships", {})) == 0:
+            resource.pop("relationships", None)
