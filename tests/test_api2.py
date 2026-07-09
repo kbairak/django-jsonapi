@@ -745,3 +745,288 @@ class TestReturnsDataMixin:
         result = ep._postprocess(Response(data=Article(id=1)), req)
         assert isinstance(result, dict)
         assert result["data"]["type"] == "articles"
+
+
+# ── OpenAPI Spec ──────────────────────────────────────────────────────────────
+
+
+class TestBuildOpenapiSpec:
+    def test_skeleton(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+        spec = api._build_openapi_spec()
+        assert spec["openapi"] == "3.0.3"
+        assert "info" in spec
+        assert spec["paths"] == {}
+        assert spec["components"]["schemas"] == {}
+
+    def test_get_one_adds_path_and_params(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_one("articles")
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
+
+        spec = api._build_openapi_spec()
+        assert "/articles/{article_id}" in spec["paths"]
+        op = spec["paths"]["/articles/{article_id}"]["get"]
+        assert op["tags"] == ["articles"]
+        param_names = [p["name"] for p in op["parameters"]]
+        assert "article_id" in param_names
+        assert op["parameters"][0]["in"] == "path"
+        assert "200" in op["responses"]
+
+    def test_get_one_schema_registered(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_one("articles")
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
+
+        spec = api._build_openapi_spec()
+        assert "articles_resource" in spec["components"]["schemas"]
+        assert spec["components"]["schemas"]["articles_resource"]["title"] == "articles"
+
+    def test_get_many_adds_collection_path(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_many("articles")
+        def list_articles(request) -> list[Article]:
+            return [Article(id=1)]
+
+        spec = api._build_openapi_spec()
+        assert "/articles" in spec["paths"]
+        op = spec["paths"]["/articles"]["get"]
+        assert op["tags"] == ["articles"]
+        assert "200" in op["responses"]
+
+    def test_get_many_with_query_params(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_many("articles")
+        def list_articles(request, sort: str = "", page: int = 1, filter__title: str = "") -> list[Article]:
+            return [Article(id=1)]
+
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles"]["get"]
+        param_names = [p["name"] for p in op["parameters"]]
+        assert "sort" in param_names
+        assert "page" in param_names
+        assert "filter[title]" in param_names
+
+    def test_get_many_with_sparse_fields(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_many("articles")
+        def list_articles(request, fields__articles: list[str] | None = None) -> list[Article]:
+            return [Article(id=1)]
+            return [Article(id=1)]
+
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles"]["get"]
+        param_names = [p["name"] for p in op["parameters"]]
+        assert "fields[articles]" in param_names
+
+    def test_create_one_has_request_body(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.create_one("articles")
+        def create_article(request, payload: Article) -> Article:
+            return payload
+
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles"]["post"]
+        assert "requestBody" in op
+        assert op["requestBody"]["required"] is True
+        assert "201" in op["responses"]
+
+    def test_edit_one_has_pk_and_body(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.edit_one("articles")
+        def update_article(request, article_id: int, payload: Article) -> Article:
+            return payload
+
+        spec = api._build_openapi_spec()
+        path = "/articles/{article_id}"
+        assert path in spec["paths"]
+        op = spec["paths"][path]["patch"]
+        assert op["parameters"][0]["name"] == "article_id"
+        assert "requestBody" in op
+
+    def test_delete_one_returns_204(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.delete_one("articles")
+        def delete_article(request, article_id: int):
+            pass
+
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles/{article_id}"]["delete"]
+        assert "204" in op["responses"]
+
+    def test_combined_path_has_multiple_methods(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_many("articles")
+        def list_articles(request) -> list[Article]:
+            return [Article(id=1)]
+
+        @api.create_one("articles")
+        def create_article(request, payload: Article) -> Article:
+            return payload
+
+        spec = api._build_openapi_spec()
+        path_item = spec["paths"]["/articles"]
+        assert "get" in path_item
+        assert "post" in path_item
+
+    def test_error_responses_included(self):
+        from djsonapi.api2 import DjsonApi
+        from djsonapi.exceptions import NotFound
+
+        api = DjsonApi()
+
+        @api.get_one("articles", errors=[NotFound])
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
+
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles/{article_id}"]["get"]
+        assert "404" in op["responses"]
+
+    def test_tags_and_tag_groups(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_one("articles")
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
+
+        @api.get_one("users")
+        def get_user(request, user_id: int) -> UserResource:
+            return UserResource(id=user_id)
+
+        spec = api._build_openapi_spec()
+        assert "tags" in spec
+        tag_names = [t["name"] for t in spec["tags"]]
+        assert "articles" in tag_names
+        assert "users" in tag_names
+        assert "x-tagGroups" in spec
+
+    def test_openapi_view_returns_json(self):
+        from django.test import RequestFactory
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_one("articles")
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
+
+        req = RequestFactory().get("/openapi.json")
+        resp = api._openapi_view(req)
+        assert resp.status_code == 200
+        data = json.loads(resp.content)
+        assert "openapi" in data
+
+    def test_docs_view_returns_html(self):
+        from django.test import RequestFactory
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_one("articles")
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
+
+        req = RequestFactory().get("/docs/")
+        resp = api._docs_view(req)
+        assert resp.status_code == 200
+        assert b"redoc" in resp.content.lower()
+
+    def test_urls_include_openapi_and_docs(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_one("articles")
+        def get_article(request, article_id: int) -> Article:
+            return Article(id=article_id)
+
+        urlpatterns = api.urls
+        url_names = {u.name for u in urlpatterns}
+        assert "openapi" in url_names
+        assert "docs" in url_names
+
+    def test_relationship_path_structure(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_relationship("articles", "author")
+        def get_author(request, article_id: int) -> UserResource:
+            return UserResource(id=1)
+
+        spec = api._build_openapi_spec()
+        path = "/articles/{article_id}/author"
+        assert path in spec["paths"]
+        op = spec["paths"][path]["get"]
+        assert op["parameters"][0]["name"] == "article_id"
+
+    def test_edit_relationship_has_body(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.edit_relationship("articles", "author")
+        def edit_author(request, article_id: int, author_id: int):
+            pass
+
+        spec = api._build_openapi_spec()
+        path = "/articles/{article_id}/relationship/author"
+        assert path in spec["paths"]
+        op = spec["paths"][path]["patch"]
+        assert "requestBody" in op
+        assert "204" in op["responses"]
+
+    def test_empty_registry_no_error(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+        spec = api._build_openapi_spec()
+        assert spec["paths"] == {}
+
+    def test_include_param_in_openapi(self):
+        from djsonapi.api2 import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_one("articles")
+        def get_article(request, article_id: int, include__author: bool = False) -> Article:
+            return Article(id=article_id)
+
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles/{article_id}"]["get"]
+        param_names = [p["name"] for p in op["parameters"]]
+        assert "include" in param_names

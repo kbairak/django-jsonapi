@@ -21,9 +21,207 @@ from djsonapi.exceptions import (
     InternalServerError,
     MethodNotAllowed,
     NotFound,
+    _class_name_to_title,
 )
 from djsonapi.resource import Resource
 from djsonapi.response import Response
+
+
+_PYTHON_TO_OPENAPI = {
+    UUID: {"type": "string", "format": "uuid"},
+    int: {"type": "integer"},
+    str: {"type": "string"},
+    float: {"type": "number"},
+    bool: {"type": "boolean"},
+}
+
+
+def _type_to_openapi_schema(tp: type) -> dict:
+    origin = get_origin(tp)
+    args = get_args(tp)
+    if origin is list:
+        item_tp = args[0] if args else str
+        return {"type": "array", "items": _type_to_openapi_schema(item_tp)}
+    return _PYTHON_TO_OPENAPI.get(tp, {"type": "string"})
+
+
+def _bracket_name(prefix: str, suffix: str) -> str:
+    parts = suffix.split("__")
+    return prefix + "[" + "][".join(parts) + "]"
+
+
+def _query_param_name(name: str) -> str:
+    if name.startswith("filter__"):
+        return _bracket_name("filter", name[len("filter__") :])
+    if name.startswith("page"):
+        if "__" in name:
+            _, suffix = name.split("__", 1)
+            return f"page[{suffix}]"
+        return "page"
+    if name == "sort":
+        return "sort"
+    if name.startswith("include__"):
+        return "include"
+    if name.startswith("fields__"):
+        return f"fields[{name[len('fields__') :]}]"
+    if name.startswith("extra__"):
+        return name[len("extra__") :]
+    raise ValueError(f"Unknown query parameter: {name}")
+
+
+def _handler_query_params(handler: Callable) -> list[dict]:
+    sig = inspect.signature(handler)
+    params = []
+
+    include_suffixes = []
+    for name in sig.parameters:
+        if name.startswith("include__"):
+            include_suffixes.append(name[len("include__") :])
+    if include_suffixes:
+        description = f"Allowed values: {', '.join(sorted(include_suffixes))}"
+        params.append({
+            "name": "include",
+            "in": "query",
+            "required": False,
+            "schema": {"type": "string"},
+            "description": description,
+        })
+
+    for name, param in sig.parameters.items():
+        if name == "request":
+            continue
+        annotation = param.annotation if param.annotation != inspect.Parameter.empty else str
+        if isinstance(annotation, type) and issubclass(annotation, Resource):
+            continue
+        if name.startswith("include__"):
+            continue
+        if not any(name.startswith(p) for p in ("filter__", "page", "sort", "include__", "fields__", "extra__")):
+            continue
+
+        has_default = param.default is not inspect.Parameter.empty
+        query_name = _query_param_name(name)
+        param_obj = {
+            "name": query_name,
+            "in": "query",
+            "required": not has_default,
+            "schema": _type_to_openapi_schema(annotation),
+        }
+        if has_default and param.default is not None and isinstance(param.default, (str, int, float, bool)):
+            param_obj["schema"]["default"] = param.default
+        params.append(param_obj)
+    return params
+
+
+def _sparse_field_names(resource_class: type[Resource]) -> list[str]:
+    names: list[str] = []
+    if resource_class._attributes:
+        names.extend(resource_class._attributes)
+    if resource_class._singular_relationships:
+        names.extend(f for f, _ in resource_class._singular_relationships)
+    if resource_class._plural_relationships:
+        names.extend(f for f, _ in resource_class._plural_relationships)
+    return names
+
+
+def _add_links_to_schema(schema: dict, resource_class: type[Resource]) -> None:
+    rel_props = schema.get("properties", {}).get("relationships", {}).get("properties", {})
+    for rel_field, _ in resource_class._singular_relationships:
+        if rel_field in rel_props:
+            rel_props[rel_field]["properties"] = rel_props[rel_field].get("properties", {})
+            rel_props[rel_field]["properties"]["links"] = {
+                "type": "object",
+                "properties": {
+                    "related": {"type": "string", "format": "uri"},
+                    "self": {"type": "string", "format": "uri"},
+                },
+            }
+    for rel_field, _ in resource_class._plural_relationships:
+        if rel_field in rel_props:
+            rel_props[rel_field]["properties"] = rel_props[rel_field].get("properties", {})
+            rel_props[rel_field]["properties"]["links"] = {
+                "type": "object",
+                "properties": {
+                    "related": {"type": "string", "format": "uri"},
+                    "self": {"type": "string", "format": "uri"},
+                },
+            }
+
+
+def _ensure_schema(spec: dict, type_name: str, resource_class: type[Resource]) -> None:
+    schema_name = f"{type_name}_resource"
+    if schema_name not in spec["components"]["schemas"]:
+        schema_obj = resource_class.jsonschema_read()
+        _add_links_to_schema(schema_obj, resource_class)
+        schema_obj["title"] = type_name
+        spec["components"]["schemas"][schema_name] = schema_obj
+
+
+def _response_schema(type_name: str, resource_class: type[Resource], spec: dict, has_include: bool = False) -> dict:
+    _ensure_schema(spec, type_name, resource_class)
+    links_schema: dict = {
+        "type": "object",
+        "properties": {"self": {"type": "string"}},
+        "additionalProperties": {"type": "string"},
+    }
+    properties: dict = {
+        "data": {"$ref": f"#/components/schemas/{type_name}_resource"},
+        "jsonapi": {
+            "type": "object",
+            "properties": {"version": {"const": "1.0"}},
+        },
+        "links": links_schema,
+    }
+    if has_include:
+        properties["included"] = {
+            "type": "array",
+            "items": {"type": "object"},
+        }
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": ["data", "jsonapi"],
+    }
+
+
+def _build_relationship_schema(rel_id_type: type, is_plural: bool) -> dict:
+    if is_plural:
+        args = get_args(rel_id_type)
+        effective_id_type = args[0] if args else str
+    else:
+        non_null_args = [a for a in get_args(rel_id_type) if a is not type(None)]
+        effective_id_type = non_null_args[0] if non_null_args else rel_id_type
+    id_schema = _type_to_openapi_schema(effective_id_type)
+    item_schema: dict = {
+        "type": "object",
+        "properties": {"id": id_schema, "type": {"type": "string"}},
+        "required": ["id", "type"],
+    }
+    if is_plural:
+        data_schema: dict = {"type": "array", "items": item_schema}
+    else:
+        data_schema = item_schema
+    return {
+        "type": "object",
+        "properties": {"data": data_schema},
+        "required": ["data"],
+    }
+
+
+def _django_path_to_openapi(django_path: str) -> str:
+    return re.sub(r"<\w+:(\w+)>", r"{\1}", django_path)
+
+
+def _merge_openapi_into(base: dict, overlay: dict) -> None:
+    for key, val in overlay.items():
+        if key in base:
+            if isinstance(base[key], dict) and isinstance(val, dict):
+                _merge_openapi_into(base[key], val)
+            elif isinstance(base[key], list) and isinstance(val, list):
+                base[key].extend(val)
+            else:
+                base[key] = val
+        else:
+            base[key] = val
 
 
 @dataclass
@@ -84,17 +282,21 @@ class Endpoint:
         ):
             return self.return_annotation
         origin = get_origin(self.return_annotation)
-        if not (isinstance(origin, type) and issubclass(origin, Response)):
+        if isinstance(origin, type) and issubclass(origin, Response):
+            args = get_args(self.return_annotation)
+            if not args:
+                return None
+            inner = args[0]
+            if isinstance(inner, type) and issubclass(inner, Resource):
+                return inner
+            iorigin = get_origin(inner)
+            if isinstance(iorigin, type) and issubclass(iorigin, list):
+                iargs = get_args(inner)
+                if iargs and isinstance(iargs[0], type) and issubclass(iargs[0], Resource):
+                    return iargs[0]
             return None
-        args = get_args(self.return_annotation)
-        if not args:
-            return None
-        inner = args[0]
-        if isinstance(inner, type) and issubclass(inner, Resource):
-            return inner
-        iorigin = get_origin(inner)
-        if isinstance(iorigin, type) and issubclass(iorigin, list):
-            iargs = get_args(inner)
+        if isinstance(origin, type) and issubclass(origin, list):
+            iargs = get_args(self.return_annotation)
             if iargs and isinstance(iargs[0], type) and issubclass(iargs[0], Resource):
                 return iargs[0]
         return None
@@ -153,6 +355,24 @@ class ExpectsIdMixin(Endpoint):
     def smart_parameters(self) -> list[inspect.Parameter]:
         return self.parameters[2:]
 
+    @staticmethod
+    def _openapi_operation(endpoint: "ExpectsIdMixin") -> dict:
+        try:
+            pk_name = endpoint.pk_name
+            pk_type = endpoint.pk_type
+        except IndexError:
+            return {}
+        return {
+            "parameters": [
+                {
+                    "name": pk_name,
+                    "in": "path",
+                    "required": True,
+                    "schema": _PYTHON_TO_OPENAPI.get(pk_type, {"type": "string"}),
+                }
+            ]
+        }
+
     def _get_kwargs(
         self,
         request: HttpRequest,
@@ -190,6 +410,21 @@ class ExpectsPayloadMixin(Endpoint):
 
     def _get_payload_schema_fn(self, resource_class: type[Resource]):
         raise NotImplementedError
+
+    @staticmethod
+    def _openapi_operation(endpoint: "ExpectsPayloadMixin") -> dict:
+        resource_class = endpoint.payload_parameter.annotation
+        schema_fn = endpoint._get_payload_schema_fn(resource_class)
+        return {
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/vnd.api+json": {
+                        "schema": schema_fn() if schema_fn else {"type": "object"}
+                    }
+                },
+            }
+        }
 
     def _get_kwargs(
         self,
@@ -384,6 +619,67 @@ class ReturnsDataMixin(ExpectsIdMixin):
 
         return kwargs, errors
 
+    @staticmethod
+    def _openapi_operation(endpoint: "ReturnsDataMixin") -> dict:
+        op: dict = {}
+
+        query_params = _handler_query_params(endpoint.handler)
+        if query_params:
+            op["parameters"] = query_params
+
+        if endpoint.sparse:
+            sparse_params = []
+            for type_name in sorted(endpoint.allowed_sparse):
+                field_names = _sparse_field_names(
+                    next(
+                        (
+                            t
+                            for t in [endpoint.return_resource_type, *endpoint.include_types]
+                            if t is not None and t._type == type_name
+                        ),
+                        type(None),
+                    )
+                )
+                desc = (
+                    f"Comma-separated list of fields. Available fields: {', '.join(field_names)}."
+                    if isinstance(field_names, list) and field_names
+                    else "Comma-separated list of fields."
+                )
+                sparse_params.append({
+                    "name": f"fields[{type_name}]",
+                    "in": "query",
+                    "required": False,
+                    "schema": {"type": "string"},
+                    "description": desc,
+                })
+            if sparse_params:
+                op.setdefault("parameters", []).extend(sparse_params)
+
+        if endpoint.return_resource_type is not None:
+            has_include = any(
+                p.name.startswith("include__")
+                for p in endpoint.smart_parameters
+            )
+            spec_placeholder: dict = {"components": {"schemas": {}}}
+            response_schema = _response_schema(
+                endpoint.return_resource_type._type,
+                endpoint.return_resource_type,
+                spec_placeholder,
+                has_include=has_include,
+            )
+            op["responses"] = {
+                str(endpoint.SUCCESS_STATUS): {
+                    "description": "OK",
+                    "content": {
+                        "application/vnd.api+json": {"schema": response_schema}
+                    },
+                }
+            }
+            if spec_placeholder["components"]["schemas"]:
+                op["components"] = spec_placeholder["components"]
+
+        return op
+
     def _postprocess(self, response: Response, request: HttpRequest) -> dict[str, Any]:
         data = response.serialize(request)
         data.setdefault("links", {})["self"] = request.get_full_path()
@@ -398,6 +694,20 @@ class ExpectsRelationshipIdsMixin(Endpoint):
     @functools.cached_property
     def ids_parameter(self) -> inspect.Parameter:
         return self.smart_parameters[0]
+
+    @staticmethod
+    def _openapi_operation(endpoint: "ExpectsRelationshipIdsMixin") -> dict:
+        annotation = endpoint.ids_parameter.annotation
+        plural = getattr(annotation, "__origin__", None) is list
+        schema = _build_relationship_schema(annotation, plural)
+        return {
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/vnd.api+json": {"schema": schema}
+                },
+            }
+        }
 
     def _get_kwargs(
         self,
@@ -783,10 +1093,97 @@ class DjsonApi:
         by_path: dict[str, list] = {}
         for endpoint in self.registry:
             by_path.setdefault(endpoint.url, []).append(endpoint)
-        return [
+        result = [
             django_path(path, self.combine_views(endpoints), name=endpoints[0].url_name)
             for path, endpoints in by_path.items()
         ]
+        result.append(django_path("openapi.json", self._openapi_view, name="openapi"))
+        result.append(django_path("docs/", self._docs_view, name="docs"))
+        return result
+
+    def _openapi_view(self, request: HttpRequest) -> JsonResponse:
+        return JsonResponse(self._build_openapi_spec())
+
+    def _docs_view(self, request: HttpRequest) -> HttpResponse:
+        try:
+            openapi_url = reverse("openapi")
+        except (NoReverseMatch, ImproperlyConfigured):
+            openapi_url = "/openapi.json"
+        html = f"""<!DOCTYPE html>
+<html>
+<head>
+  <title>API Docs</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+  <redoc spec-url='{openapi_url}'></redoc>
+  <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+</body>
+</html>"""
+        return HttpResponse(html.encode(), content_type="text/html")
+
+    def _build_openapi_spec(self) -> dict:
+        spec: dict = {
+            "openapi": "3.0.3",
+            "info": {"title": "API", "version": "1.0.0"},
+            "paths": {},
+            "components": {"schemas": {}},
+        }
+        tags_set: set[str] = set()
+
+        for endpoint in self.registry:
+            type_name = endpoint.type_name
+            tags_set.add(type_name)
+
+            raw_name = endpoint.handler.__name__.replace("_", " ")
+            summary = raw_name[0].upper() + raw_name[1:] if raw_name else raw_name
+
+            op: dict = {"tags": [type_name], "summary": summary}
+            method = endpoint.METHOD.lower()
+
+            for cls in reversed(type(endpoint).__mro__):
+                if hasattr(cls, "_openapi_operation"):
+                    fragment = cls._openapi_operation(endpoint)
+                    _merge_openapi_into(op, fragment)
+
+            if "responses" not in op:
+                op["responses"] = {
+                    str(endpoint.SUCCESS_STATUS): {
+                        "description": "No Content" if endpoint.SUCCESS_STATUS == 204 else "OK"
+                    }
+                }
+
+            if endpoint.errors:
+                for ex_class in endpoint.errors:
+                    status = str(getattr(ex_class, "STATUS", 400))
+                    title = _class_name_to_title(ex_class.__name__)
+                    op["responses"].setdefault(status, {
+                        "description": title,
+                        "content": {
+                            "application/vnd.api+json": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "errors": {"type": "array", "items": {"type": "object"}}
+                                    },
+                                }
+                            }
+                        },
+                    })
+
+            path_str = _django_path_to_openapi(f"/{endpoint.url}")
+            spec["paths"].setdefault(path_str, {})[method] = op
+
+            for schema_name, schema_obj in op.get("components", {}).get("schemas", {}).items():
+                spec["components"]["schemas"].setdefault(schema_name, schema_obj)
+
+        tags = [{"name": t} for t in sorted(tags_set)]
+        spec["tags"] = tags
+        spec["x-tagGroups"] = [
+            {"name": "Endpoints", "tags": sorted(tags_set)},
+        ]
+        return spec
 
     def combine_views(self, endpoints: list[Endpoint]) -> Callable[..., Any]:
         by_method: dict[str, Endpoint] = {endpoint.METHOD: endpoint for endpoint in endpoints}
