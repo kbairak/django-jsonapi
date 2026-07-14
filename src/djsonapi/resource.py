@@ -146,7 +146,7 @@ class Resource:
         }
 
     @staticmethod
-    def _rel_schema_singular(type_name: str, id_schema: dict) -> dict:
+    def _rel_schema_singular(type_name: str) -> dict:
         return {
             "type": "object",
             "properties": {
@@ -154,7 +154,7 @@ class Resource:
                     "type": "object",
                     "properties": {
                         "type": {"const": type_name},
-                        "id": id_schema,
+                        "id": {"type": "string"},
                     },
                     "required": ["type", "id"],
                     "additionalProperties": False,
@@ -165,7 +165,7 @@ class Resource:
         }
 
     @staticmethod
-    def _rel_schema_plural(type_name: str, id_schema: dict) -> dict:
+    def _rel_schema_plural(type_name: str) -> dict:
         return {
             "type": "object",
             "properties": {
@@ -175,7 +175,7 @@ class Resource:
                         "type": "object",
                         "properties": {
                             "type": {"const": type_name},
-                            "id": id_schema,
+                            "id": {"type": "string"},
                         },
                         "required": ["type", "id"],
                         "additionalProperties": False,
@@ -217,19 +217,9 @@ class Resource:
         if cls._singular_relationships or cls._plural_relationships:
             rel_props: dict[str, dict] = {}
             for field, type_name in cls._singular_relationships:
-                rel_props[field] = cls._rel_schema_singular(
-                    type_name, cls._field_schema(field)
-                )
+                rel_props[field] = cls._rel_schema_singular(type_name)
             for field, type_name in cls._plural_relationships:
-                field_map = cls._field_map()
-                info = field_map.get(field)
-                if info:
-                    args = get_args(info["type"])
-                    item_tp = args[0] if args else str
-                    id_schema = _type_to_schema(item_tp)
-                else:
-                    id_schema = _type_to_schema(str)
-                rel_props[field] = cls._rel_schema_plural(type_name, id_schema)
+                rel_props[field] = cls._rel_schema_plural(type_name)
             properties["relationships"] = {
                 "type": "object",
                 "properties": rel_props,
@@ -257,7 +247,7 @@ class Resource:
         create_fields = set(cls._create_fields)
 
         if "id" in create_fields:
-            properties["id"] = cls._field_schema("id")
+            properties["id"] = {"type": ["string", "integer"]}
             if "id" in cls._required_create_fields:
                 required.append("id")
 
@@ -274,20 +264,10 @@ class Resource:
             rel_props: dict[str, dict] = {}
             for field, type_name in cls._singular_relationships:
                 if field in create_rel_fields:
-                    rel_props[field] = cls._rel_schema_singular(
-                        type_name, cls._field_schema(field)
-                    )
+                    rel_props[field] = cls._rel_schema_singular(type_name)
             for field, type_name in cls._plural_relationships:
                 if field in create_rel_fields:
-                    field_map = cls._field_map()
-                    info = field_map.get(field)
-                    if info:
-                        args = get_args(info["type"])
-                        item_tp = args[0] if args else str
-                        id_schema = _type_to_schema(item_tp)
-                    else:
-                        id_schema = _type_to_schema(str)
-                    rel_props[field] = cls._rel_schema_plural(type_name, id_schema)
+                    rel_props[field] = cls._rel_schema_plural(type_name)
             if rel_props:
                 properties["relationships"] = {
                     "type": "object",
@@ -306,7 +286,7 @@ class Resource:
     def jsonschema_edit(cls) -> dict:
         properties: dict[str, dict] = {
             "type": {"const": cls._type},
-            "id": cls._field_schema("id"),
+            "id": {"type": ["string", "integer"]},
         }
         required: list[str] = ["type", "id"]
 
@@ -323,20 +303,10 @@ class Resource:
             rel_props: dict[str, dict] = {}
             for field, type_name in cls._singular_relationships:
                 if field in edit_rel_fields:
-                    rel_props[field] = cls._rel_schema_singular(
-                        type_name, cls._field_schema(field)
-                    )
+                    rel_props[field] = cls._rel_schema_singular(type_name)
             for field, type_name in cls._plural_relationships:
                 if field in edit_rel_fields:
-                    field_map = cls._field_map()
-                    info = field_map.get(field)
-                    if info:
-                        args = get_args(info["type"])
-                        item_tp = args[0] if args else str
-                        id_schema = _type_to_schema(item_tp)
-                    else:
-                        id_schema = _type_to_schema(str)
-                    rel_props[field] = cls._rel_schema_plural(type_name, id_schema)
+                    rel_props[field] = cls._rel_schema_plural(type_name)
             if rel_props:
                 properties["relationships"] = {
                     "type": "object",

@@ -17,7 +17,7 @@ class Response[T]:
 
     def serialize(self, request: HttpRequest) -> dict[str, Any]:
         result: dict[str, Any] = {"links": {"self": request.get_full_path()}}
-        if self.data:
+        if self.data is not None:
             if isinstance(self.data, Sequence):
                 result["data"] = [item.serialize() for item in self.data]
             elif isinstance(self.data, Resource):

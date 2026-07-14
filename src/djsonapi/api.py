@@ -4,7 +4,9 @@ import inspect
 import json
 import logging
 import re
+import traceback
 from dataclasses import dataclass, field
+from django.conf import settings
 from typing import Any, Callable, ClassVar, Sequence, get_args, get_origin
 from uuid import UUID
 
@@ -17,6 +19,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from djsonapi.exceptions import (
     BadRequest,
+    DjsonApiException,
     DjsonApiExceptionMulti,
     DjsonApiExceptionSingle,
     InternalServerError,
@@ -336,7 +339,7 @@ class Endpoint:
             )
         for param in self.smart_parameters:
             if param.default is inspect.Parameter.empty and param.name not in kwargs:
-                errors.append(InternalServerError(f"Missing required parameter: {param.name}"))
+                errors.append(BadRequest(f"Missing required parameter: {param.name}"))
         if errors:
             raise DjsonApiExceptionMulti(*errors)
         if asyncio.iscoroutinefunction(self.handler):
@@ -1274,7 +1277,7 @@ class DjsonApi:
                     )
                 endpoint = by_method[request.method]
                 result = await endpoint.view(request, *args, **kwargs)
-            except DjsonApiExceptionSingle as exc:
+            except DjsonApiException as exc:
                 return JsonResponse(
                     {"errors": exc.render()},
                     status=exc.status,
@@ -1282,7 +1285,8 @@ class DjsonApi:
                 )
             except Exception:
                 logging.exception("Unhandled exception in djsonapi endpoint")
-                exc = InternalServerError()
+                tb = traceback.format_exc() if settings.DEBUG else None
+                exc = InternalServerError(detail=tb)
                 return JsonResponse(
                     {"errors": exc.render()},
                     status=exc.status,
@@ -1295,7 +1299,7 @@ class DjsonApi:
                     for item in result["data"]:
                         self._fill_resource_links(item)
                         self._filter_out_sparse(item, request)
-                else:
+                elif result.get("data") is not None:
                     self._fill_resource_links(result["data"])
                     self._filter_out_sparse(result["data"], request)
                 for item in result.get("included", []):

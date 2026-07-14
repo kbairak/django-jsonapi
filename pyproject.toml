@@ -5,7 +5,11 @@ description = "JSON:API framework for Django"
 readme = "README.md"
 authors = [{ name = "Konstantinos Bairaktaris", email = "ikijob@gmail.com" }]
 requires-python = ">=3.13"
-dependencies = ["django>=4.2", "jsonschema>=4.20"]
+dependencies = [
+    "aiohttp>=3.14.1",
+    "django>=4.2",
+    "jsonschema>=4.20",
+]
 
 [tool.ruff]
 line-length = 99
