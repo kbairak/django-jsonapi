@@ -11,6 +11,9 @@ dependencies = [
     "jsonschema>=4.20",
 ]
 
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
 [tool.ruff]
 line-length = 99
 
@@ -22,7 +25,12 @@ requires = ["uv_build>=0.11.25,<0.12.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
-dev = ["pytest>=9.1.1", "django-stubs>=5.1.0"]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=0.26.0",
+    "django-stubs>=5.1.0",
+    "aioresponses>=0.7.7",
+]
 
 [tool.pyright]
 typeCheckingMode = "basic"

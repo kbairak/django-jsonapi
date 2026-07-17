@@ -172,7 +172,6 @@ class TestEndpoint:
         assert result.status == 200
 
     def test_serialize_data_null(self):
-        from djsonapi.api import Endpoint
         from djsonapi.response import Response
 
         req = RequestFactory().get("/articles/1")
@@ -184,7 +183,7 @@ class TestEndpoint:
 
         ep = Endpoint("articles", lambda r: None)
         req = RequestFactory().get("/articles/1")
-        result = ep._postprocess(Response(data=None), req)
+        ep._postprocess(Response(data=None), req)
         # Returns HttpResponse for 204; for Endpoint (200), returns Response.serialize()
         # Check through combine_views flow
         assert True
