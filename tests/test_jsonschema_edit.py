@@ -18,7 +18,7 @@ def test_basic_edit_schema():
         "type": "object",
         "properties": {
             "type": {"const": "articles"},
-            "id": {"type": "string", "format": "uuid"},
+            "id": {"type": ["string", "integer"]},
             "attributes": {
                 "type": "object",
                 "properties": {
@@ -48,7 +48,7 @@ def test_edit_empty_fields():
         "type": "object",
         "properties": {
             "type": {"const": "articles"},
-            "id": {"type": "string", "format": "uuid"},
+            "id": {"type": ["string", "integer"]},
         },
         "required": ["type", "id"],
         "additionalProperties": False,
@@ -70,7 +70,7 @@ def test_edit_with_relationships():
         "type": "object",
         "properties": {
             "type": {"const": "articles"},
-            "id": {"type": "string", "format": "uuid"},
+            "id": {"type": ["string", "integer"]},
             "attributes": {
                 "type": "object",
                 "properties": {"title": {"type": "string"}},
@@ -88,7 +88,7 @@ def test_edit_with_relationships():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "author"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,
@@ -125,7 +125,7 @@ def test_edit_plural_relationships():
         "type": "object",
         "properties": {
             "type": {"const": "articles"},
-            "id": {"type": "string", "format": "uuid"},
+            "id": {"type": ["string", "integer"]},
             "attributes": {
                 "type": "object",
                 "properties": {"title": {"type": "string"}},
@@ -143,7 +143,7 @@ def test_edit_plural_relationships():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "author"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,
@@ -161,7 +161,7 @@ def test_edit_plural_relationships():
                                     "type": "object",
                                     "properties": {
                                         "type": {"const": "tags"},
-                                        "id": {"type": "string", "format": "uuid"},
+                                        "id": {"type": "string"},
                                     },
                                     "required": ["type", "id"],
                                     "additionalProperties": False,
@@ -197,7 +197,7 @@ def test_edit_dict_relationships():
         "type": "object",
         "properties": {
             "type": {"const": "articles"},
-            "id": {"type": "string", "format": "uuid"},
+            "id": {"type": ["string", "integer"]},
             "attributes": {
                 "type": "object",
                 "properties": {"title": {"type": "string"}},
@@ -215,7 +215,7 @@ def test_edit_dict_relationships():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "users"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,
@@ -249,7 +249,7 @@ def test_edit_annotated():
         "type": "object",
         "properties": {
             "type": {"const": "articles"},
-            "id": {"type": "string", "format": "uuid"},
+            "id": {"type": ["string", "integer"]},
             "attributes": {
                 "type": "object",
                 "properties": {
@@ -279,7 +279,7 @@ def test_edit_no_attributes_no_relationships():
         "type": "object",
         "properties": {
             "type": {"const": "articles"},
-            "id": {"type": "string", "format": "uuid"},
+            "id": {"type": ["string", "integer"]},
         },
         "required": ["type", "id"],
         "additionalProperties": False,
@@ -300,7 +300,7 @@ def test_edit_only_relationships():
         "type": "object",
         "properties": {
             "type": {"const": "articles"},
-            "id": {"type": "string", "format": "uuid"},
+            "id": {"type": ["string", "integer"]},
             "relationships": {
                 "type": "object",
                 "properties": {
@@ -311,7 +311,7 @@ def test_edit_only_relationships():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "author"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,

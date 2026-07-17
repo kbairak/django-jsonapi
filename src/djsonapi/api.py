@@ -6,11 +6,12 @@ import logging
 import re
 import traceback
 from dataclasses import dataclass, field
-from django.conf import settings
-from typing import Any, Callable, ClassVar, Sequence, get_args, get_origin
+from typing import Any, Callable, ClassVar, Literal, Sequence, get_args, get_origin
 from uuid import UUID
 
 import jsonschema  # type: ignore
+from asgiref.sync import sync_to_async
+from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.urls import NoReverseMatch, URLPattern, reverse
@@ -24,7 +25,9 @@ from djsonapi.exceptions import (
     DjsonApiExceptionSingle,
     InternalServerError,
     MethodNotAllowed,
+    NotAcceptable,
     NotFound,
+    UnsupportedMediaType,
     _class_name_to_title,
 )
 from djsonapi.resource import Resource
@@ -92,7 +95,7 @@ def _handler_query_params(handler: Callable) -> list[dict]:
     include_suffixes = []
     for name in sig.parameters:
         if name.startswith("include__"):
-            include_suffixes.append(name[len("include__") :])
+            include_suffixes.append(name[len("include__") :].replace("__", "."))
     if include_suffixes:
         description = f"Allowed values: {', '.join(sorted(include_suffixes))}"
         params.append(
@@ -333,19 +336,26 @@ class Endpoint:
     async def view(self, request: HttpRequest, **url_kwargs: Any) -> Any:
         remaining_params = request.GET.dict()
         kwargs, errors = self._get_kwargs(request, url_kwargs, remaining_params)
-        if remaining_params:
+        for unknown in sorted(remaining_params):
             errors.append(
-                BadRequest(f"Unknown query parameters: {', '.join(sorted(remaining_params))}")
+                BadRequest(f"Unknown query parameter: {unknown}", source={"parameter": unknown})
             )
+        remaining_params.clear()
         for param in self.smart_parameters:
             if param.default is inspect.Parameter.empty and param.name not in kwargs:
-                errors.append(BadRequest(f"Missing required parameter: {param.name}"))
+                try:
+                    qp = _query_param_name(param.name)
+                except ValueError:
+                    qp = param.name
+                errors.append(
+                    BadRequest(f"Missing required parameter: {qp}", source={"parameter": qp})
+                )
         if errors:
             raise DjsonApiExceptionMulti(*errors)
         if asyncio.iscoroutinefunction(self.handler):
             result = await self.handler(request, **kwargs)
         else:
-            result = self.handler(request, **kwargs)
+            result = await sync_to_async(self.handler)(request, **kwargs)
         if not isinstance(result, Response):
             result = Response(data=result)
         return self._postprocess(result, request)
@@ -503,7 +513,12 @@ class ExpectsPayloadMixin(Endpoint):
             try:
                 jsonschema.validate(body.get("data", body), schema_fn())
             except jsonschema.ValidationError as e:
-                return None, [BadRequest(str(e))]
+                if "data" in body:
+                    parts = ["data"] + list(e.absolute_path)
+                else:
+                    parts = list(e.absolute_path)
+                pointer = "/" + "/".join(str(p) for p in parts) if parts else "/"
+                return None, [BadRequest(str(e), source={"pointer": pointer})]
 
         fields = self._get_payload_fields(resource_class)
         payload = resource_class._from_jsonapi_payload(body, fields=fields)
@@ -522,7 +537,8 @@ class ReturnsDataMixin(ExpectsIdMixin):
 
     def __post_init__(self):
         super().__post_init__()
-        if forbidden_includes := self.expected_includes - self.allowed_includes:
+        flat_expected = {inc for inc in self.expected_includes if "." not in inc}
+        if forbidden_includes := flat_expected - self.allowed_includes:
             raise ValueError(f"Invalid include types: {forbidden_includes}")
         if forbidden_sparse_types := self.expected_sparse - self.allowed_sparse.keys():
             raise ValueError(f"Invalid sparse types: {forbidden_sparse_types}")
@@ -551,25 +567,16 @@ class ReturnsDataMixin(ExpectsIdMixin):
 
     @functools.cached_property
     def expected_includes(self) -> set[str]:
-        """Included types that the handler function expects
-
-        >>> @api.get_many("articles", include_types=[User, Category])
-        ... def get_articles(
-        ...     request: HttpRequest,
-        ...     include__articles: bool = False,
-        ...     include__author: bool = False,
-        ...     include__categories: bool = False,
-        ... ) -> Response[list[ArticleResource]]: ...
-
-        >>> get_articles.expected_includes
-        <<< {"articles", "author", "categories"}
-        """
-
-        return {
-            parameter.name[len("include__") :]
-            for parameter in self.smart_parameters
-            if parameter.name.startswith("include__")
-        }
+        result = set()
+        for parameter in self.smart_parameters:
+            if not parameter.name.startswith("include__"):
+                continue
+            suffix = parameter.name[len("include__") :]
+            dotted = suffix.replace("__", ".")
+            parts = dotted.split(".")
+            for i in range(1, len(parts) + 1):
+                result.add(".".join(parts[:i]))
+        return result
 
     @functools.cached_property
     def allowed_sparse(self) -> dict[str, set[str]]:
@@ -632,10 +639,18 @@ class ReturnsDataMixin(ExpectsIdMixin):
         kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params or {})
 
         request_includes = {r for r in (remaining_params or {}).pop("include", "").split(",") if r}
-        if forbidden_includes := request_includes - self.expected_includes:
-            errors.append(BadRequest(f"Invalid include types: {forbidden_includes}"))
+        expanded = set()
         for inc in request_includes:
-            kwargs[f"include__{inc}"] = True
+            parts = inc.split(".")
+            for i in range(1, len(parts)):
+                expanded.add(".".join(parts[:i]))
+            expanded.add(inc)
+        if forbidden_includes := expanded - self.expected_includes:
+            errors.append(
+                BadRequest(f"Invalid include types: {forbidden_includes}", source={"parameter": "include"})
+            )
+        for inc in expanded:
+            kwargs[f"include__{inc.replace('.', '__')}"] = True
 
         request_sparse: dict[str, set[str]] = {}
         for key in list(remaining_params or {}):
@@ -643,13 +658,14 @@ class ReturnsDataMixin(ExpectsIdMixin):
                 request_sparse[m.group(1)] = {
                     f.strip() for f in (remaining_params or {}).pop(key).split(",") if f.strip()
                 }
-        if forbidden_sparse_types := request_sparse.keys() - self.allowed_sparse.keys():
-            errors.append(BadRequest(f"Invalid fields types: {forbidden_sparse_types}"))
+        for t in sorted(request_sparse.keys() - self.allowed_sparse.keys()):
+            errors.append(
+                BadRequest(f"Invalid fields type: {t}", source={"parameter": f"fields[{t}]"})
+            )
         for sparse_type, fields in request_sparse.items():
             if sparse_type in self.expected_sparse:
                 kwargs[f"fields__{sparse_type}"] = fields
 
-        expected_extra_names = {p.name[len("extra__") :] for p in self.expected_extra}
         for param in self.expected_extra:
             extra_name = param.name[len("extra__") :]
             raw = (remaining_params or {}).pop(extra_name, None)
@@ -658,9 +674,14 @@ class ReturnsDataMixin(ExpectsIdMixin):
                 try:
                     kwargs[param.name] = tp(raw)
                 except ValueError as e:
-                    errors.append(BadRequest(str(e)))
+                    errors.append(BadRequest(str(e), source={"parameter": extra_name}))
             elif param.default is inspect.Parameter.empty:
-                errors.append(BadRequest(f"Missing required extra parameter: {extra_name}"))
+                errors.append(
+                    BadRequest(
+                        f"Missing required extra parameter: {extra_name}",
+                        source={"parameter": extra_name},
+                    )
+                )
             else:
                 kwargs[param.name] = param.default
 
@@ -874,14 +895,33 @@ class GetManyEndpoint(ReturnsDataMixin, Endpoint):
                         try:
                             kwargs[param.name] = int(raw)
                         except ValueError:
-                            errors.append(BadRequest("page must be an integer"))
+                            errors.append(
+                                BadRequest("page must be an integer", source={"parameter": "page"})
+                            )
                     else:
+                        sort_fields = [s.strip() for s in raw.split(",") if s.strip()]
+                        if get_origin(param.annotation) is Literal:
+                            allowed = get_args(param.annotation)
+                            invalid = [f for f in sort_fields if f not in allowed]
+                            if invalid:
+                                errors.append(
+                                    BadRequest(
+                                        f"Invalid sort fields: {invalid}",
+                                        source={"parameter": "sort"},
+                                    )
+                                )
+                                continue
                         if _annotation_is_list(param.annotation):
-                            kwargs[param.name] = [s.strip() for s in raw.split(",") if s.strip()]
+                            kwargs[param.name] = sort_fields
                         else:
                             kwargs[param.name] = raw
                 elif param.default is inspect.Parameter.empty:
-                    errors.append(BadRequest(f"Missing required parameter: {param.name}"))
+                    errors.append(
+                        BadRequest(
+                            f"Missing required parameter: {param.name}",
+                            source={"parameter": param.name},
+                        )
+                    )
                 else:
                     kwargs[param.name] = param.default
             elif param.name.startswith("filter__"):
@@ -892,9 +932,14 @@ class GetManyEndpoint(ReturnsDataMixin, Endpoint):
                     try:
                         kwargs[param.name] = tp(raw)
                     except ValueError as e:
-                        errors.append(BadRequest(str(e)))
+                        errors.append(BadRequest(str(e), source={"parameter": filter_key}))
                 elif param.default is inspect.Parameter.empty:
-                    errors.append(BadRequest(f"Missing required parameter: {param.name}"))
+                    errors.append(
+                        BadRequest(
+                            f"Missing required parameter: {filter_key}",
+                            source={"parameter": filter_key},
+                        )
+                    )
                 else:
                     kwargs[param.name] = param.default
 
@@ -923,7 +968,7 @@ class CreateOneEndpoint(ReturnsDataMixin, ExpectsPayloadMixin, Endpoint):
 
     def _postprocess(self, response: Response, request: HttpRequest) -> Any:
         if response.data is None:
-            return JsonResponse(
+            return _jsonapi_response(
                 {"jsonapi": {"version": "1.0"}},
                 status=202,
                 content_type="application/vnd.api+json",
@@ -932,7 +977,7 @@ class CreateOneEndpoint(ReturnsDataMixin, ExpectsPayloadMixin, Endpoint):
 
 
 @dataclass
-class GetRelationshipEndpoint(ReturnsDataMixin, ExpectsRelationshipMixin, Endpoint):
+class GetRelatedResourceEndpoint(ReturnsDataMixin, ExpectsRelationshipMixin, Endpoint):
     METHOD = "GET"
     URL_NAME_TEMPLATE = "{type_name}__{relationship_name}__related"
 
@@ -940,6 +985,39 @@ class GetRelationshipEndpoint(ReturnsDataMixin, ExpectsRelationshipMixin, Endpoi
     def url(self):
         path_type = {UUID: "uuid", int: "int", str: "str"}[self.pk_type]
         return f"{self.type_name}/<{path_type}:{self.pk_name}>/{self.relationship_name}"
+
+
+@dataclass
+class GetRelationshipEndpoint(ExpectsRelationshipMixin, Endpoint):
+    METHOD = "GET"
+    URL_NAME_TEMPLATE = "{type_name}__{relationship_name}__relationship"
+
+    def _postprocess(self, response: Response, request: HttpRequest) -> dict:
+        result: dict = {"data": response.data}
+        links = result.setdefault("links", {})
+        assert isinstance(links, dict)
+        links["self"] = request.get_full_path()
+        try:
+            related = re.sub(
+                rf"/relationship/{re.escape(self.relationship_name)}$",
+                f"/{self.relationship_name}",
+                request.path,
+            )
+            links["related"] = related
+        except Exception:
+            pass
+        return result
+
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
+        kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params)
+        if remaining_params is not None:
+            remaining_params.clear()
+        return kwargs, errors
 
 
 @dataclass
@@ -970,6 +1048,56 @@ class RemoveFromRelationshipEndpoint(
     METHOD = "DELETE"
     URL_NAME_TEMPLATE = "{type_name}__{relationship_name}__relationship"
     SUCCESS_STATUS: ClassVar[int] = 204
+
+
+def _validate_content_type(request: HttpRequest) -> None:
+    if request.method not in ("POST", "PATCH", "DELETE"):
+        return
+    raw = request.META.get("CONTENT_TYPE", "")
+    if not raw:
+        return
+    parts = [p.strip() for p in raw.split(";")]
+    media_type = parts[0]
+    params = parts[1:]
+    if media_type != "application/vnd.api+json":
+        raise UnsupportedMediaType(
+            f"Unsupported media type '{media_type}'. Must be 'application/vnd.api+json'",
+            source={"header": "Content-Type"},
+        )
+    for param in params:
+        key = param.split("=")[0].strip() if "=" in param else param
+        if key not in ("ext", "profile"):
+            raise UnsupportedMediaType(
+                f"Unsupported media type parameter '{key}'. "
+                f"Only 'ext' and 'profile' are allowed.",
+                source={"header": "Content-Type"},
+            )
+        if key == "ext":
+            raise UnsupportedMediaType(
+                "This server does not support any extensions",
+                source={"header": "Content-Type"},
+            )
+
+
+def _validate_accept(request: HttpRequest) -> None:
+    raw = request.META.get("HTTP_ACCEPT", "")
+    if not raw or raw == "*/*":
+        return
+    ranges = [a.strip() for a in raw.split(",")]
+    for media_range in ranges:
+        mt = media_range.split(";")[0].strip()
+        if mt in ("*/*", "application/*", "application/vnd.api+json"):
+            return
+    raise NotAcceptable(
+        "This server only serves 'application/vnd.api+json'",
+        source={"header": "Accept"},
+    )
+
+
+def _jsonapi_response(*args, **kwargs) -> JsonResponse:
+    resp = JsonResponse(*args, **kwargs)
+    resp["Vary"] = "Accept"
+    return resp
 
 
 @dataclass
@@ -1064,7 +1192,7 @@ class DjsonApi:
 
         return decorator
 
-    def get_relationship(
+    def get_related_resource(
         self,
         type_name: str,
         relationship_name: str,
@@ -1076,13 +1204,28 @@ class DjsonApi:
             include_types = []
 
         def decorator(handler: Callable[..., Any]) -> Endpoint:
-            endpoint = GetRelationshipEndpoint(
+            endpoint = GetRelatedResourceEndpoint(
                 type_name,
                 handler,
                 errors,
                 relationship_name=relationship_name,
                 sparse=sparse,
                 include_types=include_types,
+            )
+            self.registry.append(endpoint)
+            return endpoint
+
+        return decorator
+
+    def get_relationship(
+        self,
+        type_name: str,
+        relationship_name: str,
+        errors: Sequence[type[DjsonApiExceptionSingle]] | None = None,
+    ) -> Callable[[Callable[..., Any]], Endpoint]:
+        def decorator(handler: Callable[..., Any]) -> Endpoint:
+            endpoint = GetRelationshipEndpoint(
+                type_name, handler, errors, relationship_name=relationship_name
             )
             self.registry.append(endpoint)
             return endpoint
@@ -1149,8 +1292,48 @@ class DjsonApi:
 
         return decorator
 
+    def _auto_derive_relationship_endpoints(self):
+        existing = {
+            (ep.type_name, ep.relationship_name)
+            for ep in self.registry
+            if isinstance(ep, GetRelationshipEndpoint)
+        }
+        for ep in list(self.registry):
+            if not isinstance(ep, GetRelatedResourceEndpoint):
+                continue
+            key = (ep.type_name, ep.relationship_name)
+            if key in existing:
+                continue
+            self.registry.append(self._make_auto_relationship_ep(ep))
+            existing.add(key)
+
+    def _make_auto_relationship_ep(
+        self, related_ep: GetRelatedResourceEndpoint
+    ) -> GetRelationshipEndpoint:
+        async def _auto_handler(request, **kw):
+            raw = related_ep.handler(request, **kw)
+            if asyncio.iscoroutine(raw):
+                raw = await raw
+            if isinstance(raw, Response):
+                data = raw.data
+            else:
+                data = raw
+            if data is None:
+                return None
+            if isinstance(data, list):
+                return [{"type": r._type, "id": str(r.id)} for r in data]
+            return {"type": data._type, "id": str(data.id)}
+
+        return GetRelationshipEndpoint(
+            related_ep.type_name,
+            _auto_handler,
+            errors=related_ep.errors,
+            relationship_name=related_ep.relationship_name,
+        )
+
     @property
     def urls(self) -> list[URLPattern]:
+        self._auto_derive_relationship_endpoints()
         by_path: dict[str, list] = {}
         for endpoint in self.registry:
             by_path.setdefault(endpoint.url, []).append(endpoint)
@@ -1160,7 +1343,24 @@ class DjsonApi:
         ]
         result.append(django_path("openapi.json", self._openapi_view, name="openapi"))
         result.append(django_path("docs/", self._docs_view, name="docs"))
+        result.append(django_path("<path:path>", self._catch_all_404_view))
         return result
+
+    def _catch_all_404_view(self, request: HttpRequest, path: str = "") -> JsonResponse:
+        return _jsonapi_response(
+            {
+                "errors": [
+                    {
+                        "status": "404",
+                        "code": "not_found",
+                        "title": "Not Found",
+                        "detail": f"The path '{request.path}' does not exist.",
+                    }
+                ]
+            },
+            status=404,
+            content_type="application/vnd.api+json",
+        )
 
     def _openapi_view(self, request: HttpRequest) -> JsonResponse:
         return JsonResponse(self._build_openapi_spec())
@@ -1270,15 +1470,17 @@ class DjsonApi:
         @csrf_exempt
         async def view(request: HttpRequest, *args, **kwargs):
             try:
+                _validate_accept(request)
                 if request.method not in by_method:
                     raise MethodNotAllowed(
                         f"Method {request.method} not allowed for this endpoint, "
                         f"allowed methods: {', '.join(by_method.keys())}"
                     )
                 endpoint = by_method[request.method]
+                _validate_content_type(request)
                 result = await endpoint.view(request, *args, **kwargs)
             except DjsonApiException as exc:
-                return JsonResponse(
+                return _jsonapi_response(
                     {"errors": exc.render()},
                     status=exc.status,
                     content_type="application/vnd.api+json",
@@ -1287,7 +1489,7 @@ class DjsonApi:
                 logging.exception("Unhandled exception in djsonapi endpoint")
                 tb = traceback.format_exc() if settings.DEBUG else None
                 exc = InternalServerError(detail=tb)
-                return JsonResponse(
+                return _jsonapi_response(
                     {"errors": exc.render()},
                     status=exc.status,
                     content_type="application/vnd.api+json",
@@ -1305,7 +1507,7 @@ class DjsonApi:
                 for item in result.get("included", []):
                     self._fill_resource_links(item)
                     self._filter_out_sparse(item, request)
-                django_response = JsonResponse(
+                django_response = _jsonapi_response(
                     result, status=endpoint.SUCCESS_STATUS, content_type="application/vnd.api+json"
                 )
                 if endpoint.SUCCESS_STATUS == 201 and isinstance(result.get("data"), dict):
@@ -1321,7 +1523,7 @@ class DjsonApi:
 
             if isinstance(result, Response):
                 data = result.serialize(request)
-                return JsonResponse(
+                return _jsonapi_response(
                     data,
                     status=result.status or endpoint.SUCCESS_STATUS,
                     content_type="application/vnd.api+json",

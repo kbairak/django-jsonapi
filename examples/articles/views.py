@@ -128,7 +128,9 @@ async def list_articles(
     categories_set = set[CategoryResource]()
 
     async for article in qs:
-        articles.append(await _article_to_resource(article, include_categories=include__categories))
+        articles.append(
+            await _article_to_resource(article, include_categories=include__categories)
+        )
         if include__author:
             users.add(
                 UserResource(
@@ -157,13 +159,19 @@ async def list_articles(
 
 
 @api.create_one("articles", errors=[BadRequest])
-async def create_article(request: HttpRequest, payload: ArticleResource) -> ArticleResource:
-    article = await ArticleModel.objects.acreate(
+def create_article(request: HttpRequest, payload: ArticleResource) -> ArticleResource:
+    article = ArticleModel.objects.create(
         title=payload.title, content=payload.content, author_id=payload.author
     )
     if payload.categories:
-        await article.categories.aset(payload.categories)
-    return await _article_to_resource(article)
+        article.categories.set(payload.categories)
+    return ArticleResource(
+        id=article.id,
+        title=article.title,
+        content=article.content,
+        created_at=article.created_at,
+        author=article.author_id,
+    )
 
 
 @api.edit_one("articles", errors=[BadRequest, NotFound, Conflict])
@@ -203,7 +211,7 @@ async def delete_article(request: HttpRequest, article_id: int) -> None:
 # ── ArticleModel Relationships ────────────────────────────────────────────
 
 
-@api.get_relationship("articles", "author", errors=[BadRequest])
+@api.get_related_resource("articles", "author", errors=[BadRequest])
 async def get_article_author(request: HttpRequest, article_id: int) -> UserResource:
     try:
         article = await ArticleModel.objects.select_related("author").aget(id=article_id)
@@ -226,7 +234,7 @@ async def edit_article_author(request: HttpRequest, article_id: int, author_id: 
     await article.asave()
 
 
-@api.get_relationship("articles", "categories", errors=[BadRequest])
+@api.get_related_resource("articles", "categories", errors=[BadRequest])
 async def get_article_categories(
     request: HttpRequest,
     article_id: int,
@@ -312,7 +320,7 @@ async def list_users(request: HttpRequest, page: int = 1) -> Response[list[UserR
     return Response(data=users, links=links)
 
 
-@api.get_relationship("users", "articles", errors=[BadRequest])
+@api.get_related_resource("users", "articles", errors=[BadRequest])
 async def get_user_articles(
     request: HttpRequest, user_id: int, page: int = 1
 ) -> Response[list[ArticleResource]]:
@@ -440,7 +448,7 @@ async def delete_category(request: HttpRequest, category_id: int) -> None:
     await category.adelete()
 
 
-@api.get_relationship("categories", "articles", errors=[BadRequest])
+@api.get_related_resource("categories", "articles", errors=[BadRequest])
 async def get_category_articles(
     request: HttpRequest, category_id: int, page: int = 1
 ) -> Response[list[ArticleResource]]:
@@ -473,8 +481,6 @@ async def reset_category_articles(
     except CategoryModel.DoesNotExist:
         raise NotFound(f"CategoryModel with id '{category_id}' not found")
     await category.articles.aset(article_ids)
-
-
 
 
 @api.add_to_relationship("categories", "articles", errors=[BadRequest])

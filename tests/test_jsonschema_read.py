@@ -36,7 +36,7 @@ def test_article_read_schema():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "author"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,
@@ -132,7 +132,7 @@ def test_no_attributes_read_schema():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "author"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,
@@ -184,7 +184,7 @@ def test_plural_relationships_in_schema():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "author"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,
@@ -202,7 +202,7 @@ def test_plural_relationships_in_schema():
                                     "type": "object",
                                     "properties": {
                                         "type": {"const": "tags"},
-                                        "id": {"type": "string", "format": "uuid"},
+                                        "id": {"type": "string"},
                                     },
                                     "required": ["type", "id"],
                                     "additionalProperties": False,
@@ -253,7 +253,7 @@ def test_dict_relationships():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "users"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,
@@ -306,7 +306,7 @@ def test_tuple_plural_relationships():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "author"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,
@@ -324,7 +324,7 @@ def test_tuple_plural_relationships():
                                     "type": "object",
                                     "properties": {
                                         "type": {"const": "tag_objects"},
-                                        "id": {"type": "string", "format": "uuid"},
+                                        "id": {"type": "string"},
                                     },
                                     "required": ["type", "id"],
                                     "additionalProperties": False,
@@ -343,7 +343,7 @@ def test_tuple_plural_relationships():
                                     "type": "object",
                                     "properties": {
                                         "type": {"const": "categories"},
-                                        "id": {"type": "string", "format": "uuid"},
+                                        "id": {"type": "string"},
                                     },
                                     "required": ["type", "id"],
                                     "additionalProperties": False,
@@ -403,7 +403,7 @@ def test_default_and_annotated_in_schema():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "author"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,

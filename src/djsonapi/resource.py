@@ -70,6 +70,7 @@ def _type_to_schema(tp: Any, default: Any = MISSING) -> dict:
 @dataclass_transform()
 class Resource:
     id: Any
+    meta: dict | None = None
     _type: ClassVar[str] = ""
     _attributes: ClassVar[list[str]] = []
     _singular_relationships: ClassVar[Any] = []
@@ -416,4 +417,7 @@ class Resource:
                     assert isinstance(value, Sequence)
                     rel["data"] = [{"type": type_name, "id": str(item)} for item in value]
                 result.setdefault("relationships", {})[field] = rel
+        meta = getattr(self, "meta", MISSING)
+        if meta is not None and meta is not MISSING:
+            result["meta"] = meta
         return result

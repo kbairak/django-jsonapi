@@ -69,7 +69,7 @@ def test_create_with_client_id():
         "type": "object",
         "properties": {
             "type": {"const": "articles"},
-            "id": {"type": "string", "format": "uuid"},
+            "id": {"type": ["string", "integer"]},
             "attributes": {
                 "type": "object",
                 "properties": {
@@ -117,7 +117,7 @@ def test_create_with_relationships():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "users"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,
@@ -169,7 +169,7 @@ def test_create_with_plural_relationships():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "users"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,
@@ -187,7 +187,7 @@ def test_create_with_plural_relationships():
                                     "type": "object",
                                     "properties": {
                                         "type": {"const": "tags"},
-                                        "id": {"type": "string", "format": "uuid"},
+                                        "id": {"type": "string"},
                                     },
                                     "required": ["type", "id"],
                                     "additionalProperties": False,
@@ -237,7 +237,7 @@ def test_create_dict_relationships():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "users"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,
@@ -289,7 +289,7 @@ def test_create_tuple_plural_relationships():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "author"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,
@@ -307,7 +307,7 @@ def test_create_tuple_plural_relationships():
                                     "type": "object",
                                     "properties": {
                                         "type": {"const": "tag_objects"},
-                                        "id": {"type": "string", "format": "uuid"},
+                                        "id": {"type": "string"},
                                     },
                                     "required": ["type", "id"],
                                     "additionalProperties": False,
@@ -326,7 +326,7 @@ def test_create_tuple_plural_relationships():
                                     "type": "object",
                                     "properties": {
                                         "type": {"const": "categories"},
-                                        "id": {"type": "string", "format": "uuid"},
+                                        "id": {"type": "string"},
                                     },
                                     "required": ["type", "id"],
                                     "additionalProperties": False,
@@ -422,7 +422,7 @@ def test_create_only_relationships_no_attributes():
                                 "type": "object",
                                 "properties": {
                                     "type": {"const": "author"},
-                                    "id": {"type": "string", "format": "uuid"},
+                                    "id": {"type": "string"},
                                 },
                                 "required": ["type", "id"],
                                 "additionalProperties": False,

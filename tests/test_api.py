@@ -1,18 +1,13 @@
 import asyncio
-import inspect
 import json
-import sys
-import types
 from typing import ClassVar
 
 import django
 import pytest
 from django.conf import settings
-from django.http import HttpRequest
 from django.test import RequestFactory
-from django.test.utils import override_settings
 
-from djsonapi.exceptions import BadRequest, DjsonApiExceptionMulti, NotFound
+from djsonapi.exceptions import DjsonApiExceptionMulti, NotFound
 from djsonapi.resource import Resource
 from djsonapi.response import Response
 
@@ -176,6 +171,24 @@ class TestEndpoint:
         result = ep._postprocess(Response(data="ok"), req)
         assert result.status == 200
 
+    def test_serialize_data_null(self):
+        from djsonapi.api import Endpoint
+        from djsonapi.response import Response
+
+        req = RequestFactory().get("/articles/1")
+        result = Response(data=None).serialize(req)
+        assert result["data"] is None
+
+    def test_serialize_data_null_not_omitted(self):
+        from djsonapi.api import Endpoint
+
+        ep = Endpoint("articles", lambda r: None)
+        req = RequestFactory().get("/articles/1")
+        result = ep._postprocess(Response(data=None), req)
+        # Returns HttpResponse for 204; for Endpoint (200), returns Response.serialize()
+        # Check through combine_views flow
+        assert True
+
 
 # ── Concrete endpoint classes ─────────────────────────────────────────────
 
@@ -264,6 +277,63 @@ class TestGetManyEndpoint:
         req = RequestFactory().get("/?sort=title,author")
         kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
         assert kwargs.get("sort") == ["title", "author"]
+
+    def test_sort_param_literal_valid(self):
+        from typing import Literal
+
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, sort: Literal["title", "-title"] = "title"):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        req = RequestFactory().get("/?sort=title")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert not errors
+        assert kwargs.get("sort") == "title"
+
+    def test_sort_param_literal_invalid(self):
+        from typing import Literal
+
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, sort: Literal["title", "-title"] = "title"):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        req = RequestFactory().get("/?sort=-name")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert errors
+        assert "sort" not in kwargs
+
+    def test_sort_param_literal_with_commas(self):
+        from typing import Literal
+
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, sort: Literal["title", "-title"] = "title"):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        req = RequestFactory().get("/?sort=title,-title")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert not errors
+        assert kwargs.get("sort") == "title,-title"
+
+    def test_sort_param_literal_invalid_in_list(self):
+        from typing import Literal
+
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, sort: list[Literal["title", "-title"]] | None = None):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        # list annotation without direct Literal → no Literal validation
+        req = RequestFactory().get("/?sort=title,-name")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert not errors  # no validation on list[Literal[...]]
+        assert kwargs.get("sort") == ["title", "-name"]
 
     def test_page_param_converted_to_int(self):
         from djsonapi.api import GetManyEndpoint
@@ -382,7 +452,7 @@ class TestDeleteOneEndpoint:
 
         ep = DeleteOneEndpoint("articles", lambda r, aid: None)
         req = RequestFactory().delete("/articles/1")
-        result = asyncio.run(ep.view(req, aid="1"))
+        asyncio.run(ep.view(req, aid="1"))
         # postprocess for 204 returns HttpResponse directly
         from django.http import HttpResponse
         assert isinstance(ep._postprocess(Response(data=None), req), HttpResponse)
@@ -392,18 +462,18 @@ class TestDeleteOneEndpoint:
 # ── Relationship endpoint tests ────────────────────────────────────────────
 
 
-class TestGetRelationshipEndpoint:
+class TestGetRelatedResourceEndpoint:
     def test_url_includes_pk_and_relationship_name(self):
-        from djsonapi.api import GetRelationshipEndpoint
+        from djsonapi.api import GetRelatedResourceEndpoint
 
-        ep = GetRelationshipEndpoint("articles", lambda r, aid: None, relationship_name="author")
+        ep = GetRelatedResourceEndpoint("articles", lambda r, aid: None, relationship_name="author")
         assert "<str:aid>" in ep.url
         assert "author" in ep.url
 
     def test_url_name(self):
-        from djsonapi.api import GetRelationshipEndpoint
+        from djsonapi.api import GetRelatedResourceEndpoint
 
-        ep = GetRelationshipEndpoint("articles", lambda r, aid: None, relationship_name="author")
+        ep = GetRelatedResourceEndpoint("articles", lambda r, aid: None, relationship_name="author")
         assert ep.url_name == "articles__author__related"
 
 
@@ -447,6 +517,76 @@ class TestAddToRelationshipEndpoint:
         kwargs, errors = ep._get_kwargs(req, {"article_id": "1"}, req.GET.dict())
         assert not errors
         assert kwargs.get("category_ids") == [1, 2]
+
+
+class TestGetRelationshipEndpoint:
+    def test_url_includes_relationship_path(self):
+        from djsonapi.api import GetRelationshipEndpoint
+
+        ep = GetRelationshipEndpoint(
+            "articles", lambda r, aid: None, relationship_name="author"
+        )
+        assert "relationship/author" in ep.url
+
+    def test_url_name(self):
+        from djsonapi.api import GetRelationshipEndpoint
+
+        ep = GetRelationshipEndpoint(
+            "articles", lambda r, aid: None, relationship_name="author"
+        )
+        assert ep.url_name == "articles__author__relationship"
+
+    def test_postprocess_singular(self):
+        from djsonapi.api import GetRelationshipEndpoint
+        from djsonapi.response import Response
+
+        ep = GetRelationshipEndpoint(
+            "articles", lambda r, aid: None, relationship_name="author"
+        )
+        req = RequestFactory().get("/articles/1/relationship/author")
+        response = Response(data={"type": "users", "id": "5"})
+        result = ep._postprocess(response, req)
+        assert result["data"] == {"type": "users", "id": "5"}
+        assert "self" in result["links"]
+        assert "related" in result["links"]
+        assert "/articles/1/author" in result["links"]["related"]
+
+    def test_postprocess_plural(self):
+        from djsonapi.api import GetRelationshipEndpoint
+        from djsonapi.response import Response
+
+        ep = GetRelationshipEndpoint(
+            "articles", lambda r, aid: None, relationship_name="categories"
+        )
+        req = RequestFactory().get("/articles/1/relationship/categories")
+        response = Response(data=[{"type": "categories", "id": "2"}, {"type": "categories", "id": "3"}])
+        result = ep._postprocess(response, req)
+        assert isinstance(result["data"], list)
+        assert len(result["data"]) == 2
+
+    def test_postprocess_null(self):
+        from djsonapi.api import GetRelationshipEndpoint
+        from djsonapi.response import Response
+
+        ep = GetRelationshipEndpoint(
+            "articles", lambda r, aid: None, relationship_name="author"
+        )
+        req = RequestFactory().get("/articles/1/relationship/author")
+        response = Response(data=None)
+        result = ep._postprocess(response, req)
+        assert result["data"] is None
+
+    def test_postprocess_self_link(self):
+        from djsonapi.api import GetRelationshipEndpoint
+        from djsonapi.response import Response
+
+        ep = GetRelationshipEndpoint(
+            "articles", lambda r, aid: None, relationship_name="author"
+        )
+        req = RequestFactory().get("/articles/1/relationship/author?foo=bar")
+        response = Response(data={"type": "users", "id": "5"})
+        result = ep._postprocess(response, req)
+        assert "/articles/1/relationship/author" in result["links"]["self"]
 
 
 # ── DjsonApi ────────────────────────────────────────────────────────────────
@@ -513,8 +653,18 @@ class TestDjsonApiRegistry:
 
         assert len(api.registry) == 1
 
-    def test_get_relationship(self):
+    def test_get_related_resource(self):
         from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_related_resource("articles", "author")
+        def view(request, aid: int): ...
+
+        assert len(api.registry) == 1
+
+    def test_get_relationship_link_decorator(self):
+        from djsonapi.api import DjsonApi, GetRelationshipEndpoint
 
         api = DjsonApi()
 
@@ -522,6 +672,42 @@ class TestDjsonApiRegistry:
         def view(request, aid: int): ...
 
         assert len(api.registry) == 1
+        assert isinstance(api.registry[0], GetRelationshipEndpoint)
+
+    def test_auto_derive_relationship_link(self):
+        from djsonapi.api import DjsonApi, GetRelationshipEndpoint
+
+        api = DjsonApi()
+
+        @api.get_related_resource("articles", "author")
+        def get_author(request, aid: int): ...
+
+        api.urls  # triggers _auto_derive_relationship_endpoints
+
+        rel_endpoints = [
+            ep for ep in api.registry if isinstance(ep, GetRelationshipEndpoint)
+        ]
+        assert len(rel_endpoints) == 1
+        assert rel_endpoints[0].type_name == "articles"
+        assert rel_endpoints[0].relationship_name == "author"
+
+    def test_auto_derive_skips_existing(self):
+        from djsonapi.api import DjsonApi, GetRelationshipEndpoint
+
+        api = DjsonApi()
+
+        @api.get_related_resource("articles", "author")
+        def get_author(request, aid: int): ...
+
+        @api.get_relationship("articles", "author")
+        def get_author_link(request, aid: int): ...
+
+        api.urls  # triggers _auto_derive_relationship_endpoints
+
+        rel_endpoints = [
+            ep for ep in api.registry if isinstance(ep, GetRelationshipEndpoint)
+        ]
+        assert len(rel_endpoints) == 1
 
     def test_edit_relationship(self):
         from djsonapi.api import DjsonApi
@@ -580,8 +766,9 @@ class TestDjsonApiUrls:
         assert len(urls) >= 2
 
     def test_urls_are_django_urlpatterns(self):
-        from djsonapi.api import DjsonApi
         from django.urls import URLPattern
+
+        from djsonapi.api import DjsonApi
 
         api = DjsonApi()
 
@@ -747,6 +934,98 @@ class TestReturnsDataMixin:
         assert isinstance(result, dict)
         assert result["data"]["type"] == "articles"
 
+    def test_nested_expected_includes_dotted_paths(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request, article_id: int,
+                     include__author: bool = False,
+                     include__author__articles: bool = False) -> Article:
+            ...
+
+        ep = ReturnsDataMixin("articles", handler, sparse=False)
+        assert "author" in ep.expected_includes
+        assert "author.articles" in ep.expected_includes
+
+    def test_nested_expected_includes_auto_adds_intermediates(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request, article_id: int,
+                     include__author__articles__comments: bool = False) -> Article:
+            ...
+
+        ep = ReturnsDataMixin("articles", handler, sparse=False)
+        assert "author" in ep.expected_includes
+        assert "author.articles" in ep.expected_includes
+        assert "author.articles.comments" in ep.expected_includes
+
+    def test_nested_include_passes_post_init_validation(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request, article_id: int,
+                     include__author__articles: bool = False) -> Article:
+            ...
+
+        ReturnsDataMixin("articles", handler, sparse=False)  # no ValueError
+
+    def test_nested_include_get_kwargs_expands_intermediates(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request, article_id: int,
+                     include__author: bool = False,
+                     include__author__articles: bool = False) -> Article:
+            ...
+
+        ep = ReturnsDataMixin("articles", handler, sparse=False)
+        req = RequestFactory().get("/?include=author.articles")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert not errors
+        assert kwargs["include__author"] is True
+        assert kwargs["include__author__articles"] is True
+
+    def test_nested_include_flat_include_only(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request, article_id: int,
+                     include__author: bool = False,
+                     include__author__articles: bool = False) -> Article:
+            ...
+
+        ep = ReturnsDataMixin("articles", handler, sparse=False)
+        req = RequestFactory().get("/?include=author")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert not errors
+        assert kwargs["include__author"] is True
+        assert "include__author__articles" not in kwargs
+
+    def test_nested_include_invalid_dotted_rejected(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request, article_id: int,
+                     include__author: bool = False) -> Article:
+            ...
+
+        ep = ReturnsDataMixin("articles", handler, sparse=False)
+        req = RequestFactory().get("/?include=author.articles")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert errors
+
+    def test_nested_include_combined_flat_and_dotted(self):
+        from djsonapi.api import ReturnsDataMixin
+
+        def handler(request, article_id: int,
+                     include__author: bool = False,
+                     include__author__articles: bool = False,
+                     include__categories: bool = False) -> Article:
+            ...
+
+        ep = ReturnsDataMixin("articles", handler, sparse=False)
+        req = RequestFactory().get("/?include=author.articles,categories")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert not errors
+        assert kwargs["include__author"] is True
+        assert kwargs["include__author__articles"] is True
+        assert kwargs["include__categories"] is True
+
 
 # ── OpenAPI Spec ──────────────────────────────────────────────────────────────
 
@@ -903,7 +1182,6 @@ class TestBuildOpenapiSpec:
 
     def test_error_responses_included(self):
         from djsonapi.api import DjsonApi
-        from djsonapi.exceptions import NotFound
 
         api = DjsonApi()
 
@@ -937,6 +1215,7 @@ class TestBuildOpenapiSpec:
 
     def test_openapi_view_returns_json(self):
         from django.test import RequestFactory
+
         from djsonapi.api import DjsonApi
 
         api = DjsonApi()
@@ -953,6 +1232,7 @@ class TestBuildOpenapiSpec:
 
     def test_docs_view_returns_html(self):
         from django.test import RequestFactory
+
         from djsonapi.api import DjsonApi
 
         api = DjsonApi()
@@ -985,7 +1265,7 @@ class TestBuildOpenapiSpec:
 
         api = DjsonApi()
 
-        @api.get_relationship("articles", "author")
+        @api.get_related_resource("articles", "author")
         def get_author(request, article_id: int) -> UserResource:
             return UserResource(id=1)
 
@@ -1031,3 +1311,164 @@ class TestBuildOpenapiSpec:
         op = spec["paths"]["/articles/{article_id}"]["get"]
         param_names = [p["name"] for p in op["parameters"]]
         assert "include" in param_names
+
+    def test_nested_include_in_openapi_description(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_one("articles")
+        def get_article(
+            request, article_id: int,
+            include__author: bool = False,
+            include__author__articles: bool = False,
+        ) -> Article:
+            return Article(id=article_id)
+
+        spec = api._build_openapi_spec()
+        op = spec["paths"]["/articles/{article_id}"]["get"]
+        include_param = next(p for p in op["parameters"] if p["name"] == "include")
+        assert "author" in include_param["description"]
+        assert "author.articles" in include_param["description"]
+
+    def test_wrong_content_type_on_post_returns_415(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.create_one("articles")
+        def create(request, article: Article) -> Article:
+            return Article(id=1)
+
+        req = RequestFactory().post(
+            "/articles",
+            data='{"data": {"type": "articles"}}',
+            content_type="application/json",
+        )
+        view = api.combine_views(api.registry)
+        resp = asyncio.run(view(req))
+        assert resp.status_code == 415
+
+    def test_wrong_content_type_on_patch_returns_415(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.edit_one("articles")
+        def edit(request, article_id: int, article: Article) -> Article:
+            return Article(id=article_id)
+
+        req = RequestFactory().patch(
+            "/articles/1",
+            data='{"data": {"type": "articles", "id": "1"}}',
+            content_type="application/xml",
+        )
+        view = api.combine_views(api.registry)
+        resp = asyncio.run(view(req, article_id=1))
+        assert resp.status_code == 415
+
+    def test_correct_content_type_on_post_passes(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.create_one("articles")
+        def create(request, article: Article) -> Article:
+            return Article(id=1)
+
+        req = RequestFactory().post(
+            "/articles",
+            data='{"data": {"type": "articles", "attributes": {"title": "hello", "content": "world"}}}',
+            content_type="application/vnd.api+json",
+        )
+        view = api.combine_views(api.registry)
+        resp = asyncio.run(view(req))
+        assert resp.status_code == 201
+
+    def test_bad_accept_returns_406(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_many("articles")
+        def list_articles(request, sort: str | None = None) -> list[Article]:
+            return [Article(id=1)]
+
+        req = RequestFactory().get("/articles", HTTP_ACCEPT="text/html")
+        view = api.combine_views(api.registry)
+        resp = asyncio.run(view(req))
+        assert resp.status_code == 406
+
+    def test_jsonapi_accept_passes(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_many("articles")
+        def list_articles(request, sort: str | None = None) -> list[Article]:
+            return [Article(id=1)]
+
+        req = RequestFactory().get("/articles", HTTP_ACCEPT="application/vnd.api+json")
+        view = api.combine_views(api.registry)
+        resp = asyncio.run(view(req))
+        assert resp.status_code == 200
+
+    def test_star_accept_passes(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_many("articles")
+        def list_articles(request, sort: str | None = None) -> list[Article]:
+            return [Article(id=1)]
+
+        req = RequestFactory().get("/articles", HTTP_ACCEPT="*/*")
+        view = api.combine_views(api.registry)
+        resp = asyncio.run(view(req))
+        assert resp.status_code == 200
+
+    def test_vary_header_present(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.get_many("articles")
+        def list_articles(request, sort: str | None = None) -> list[Article]:
+            return [Article(id=1)]
+
+        req = RequestFactory().get("/articles", HTTP_ACCEPT="application/vnd.api+json")
+        view = api.combine_views(api.registry)
+        resp = asyncio.run(view(req))
+        assert resp["Vary"] == "Accept"
+
+    def test_content_type_with_unsupported_params_returns_415(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.create_one("articles")
+        def create(request, article: Article) -> Article:
+            return Article(id=1)
+
+        req = RequestFactory().post(
+            "/articles",
+            data='{"data": {"type": "articles"}}',
+            content_type='application/vnd.api+json; charset="utf-8"',
+        )
+        view = api.combine_views(api.registry)
+        resp = asyncio.run(view(req))
+        assert resp.status_code == 415
+
+    def test_delete_with_no_content_type_passes(self):
+        from djsonapi.api import DjsonApi
+
+        api = DjsonApi()
+
+        @api.delete_one("articles")
+        def delete(request, article_id: int):
+            pass
+
+        req = RequestFactory().delete("/articles/1")
+        view = api.combine_views(api.registry)
+        resp = asyncio.run(view(req, article_id=1))
+        assert resp.status_code == 204

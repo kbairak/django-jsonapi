@@ -36,6 +36,22 @@ class SparseArticle(Resource):
     title: str
 
 
+def _make_request():
+    import django
+    from django.conf import settings
+    if not settings.configured:
+        settings.configure(
+            DEBUG=True,
+            DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
+            ALLOWED_HOSTS=["*"],
+            SECRET_KEY="test",
+            ROOT_URLCONF=None,
+        )
+        django.setup()
+    from django.test import RequestFactory
+    return RequestFactory().get("/articles")
+
+
 def test_basic_serialize():
     id = uuid.uuid4()
     author = uuid.uuid4()
@@ -141,6 +157,43 @@ def test_serialize_dict_relationships():
             "author": {"data": {"type": "users", "id": str(author)}}
         },
     }
+
+
+def test_resource_meta():
+    id = uuid.uuid4()
+    article = Article(id=id, title="Hello", content="World", author=uuid.uuid4())
+    article.meta = {"computed": "value"}
+    result = article.serialize()
+    assert result["meta"] == {"computed": "value"}
+
+
+def test_resource_meta_none():
+    id = uuid.uuid4()
+    article = Article(id=id, title="Hello", content="World", author=uuid.uuid4())
+    result = article.serialize()
+    assert "meta" not in result
+
+
+def test_response_meta():
+    from djsonapi.response import Response
+
+    id = uuid.uuid4()
+    article = Article(id=id, title="Hello", content="World", author=uuid.uuid4())
+    resp = Response(data=article, meta={"count": 42})
+    req = _make_request()
+    result = resp.serialize(req)
+    assert result["meta"] == {"count": 42}
+
+
+def test_response_meta_none():
+    from djsonapi.response import Response
+
+    id = uuid.uuid4()
+    article = Article(id=id, title="Hello", content="World", author=uuid.uuid4())
+    resp = Response(data=article)
+    req = _make_request()
+    result = resp.serialize(req)
+    assert "meta" not in result
 
 
 def test_serialize_tuple_plural_relationships():

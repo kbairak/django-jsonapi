@@ -126,3 +126,11 @@ class Conflict(DjsonApiExceptionSingle):
 
 class TooManyRequests(DjsonApiExceptionSingle):
     STATUS = 429
+
+
+class UnsupportedMediaType(DjsonApiExceptionSingle):
+    STATUS = 415
+
+
+class NotAcceptable(DjsonApiExceptionSingle):
+    STATUS = 406
