@@ -367,6 +367,63 @@ class TestGetManyEndpoint:
         kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
         assert kwargs.get("filter__title") == "hello"
 
+    def test_filter_param_bracket_form(self):
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, filter__title__contains: str = ""):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        req = RequestFactory().get("/?filter[title][contains]=hello")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert kwargs.get("filter__title__contains") == "hello"
+
+    def test_filter_param_bracket_preferred_over_bare(self):
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, filter__title: str = ""):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        req = RequestFactory().get("/?filter[title]=bracket&title=bare")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert kwargs.get("filter__title") == "bracket"
+
+    def test_page_bracket_param(self):
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, page__number: int = 1):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        req = RequestFactory().get("/?page[number]=3")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert not errors
+        assert kwargs.get("page__number") == 3
+
+    def test_page_bracket_param_invalid(self):
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, page__number: int = 1):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        req = RequestFactory().get("/?page[number]=abc")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert errors
+
+    def test_page_bracket_param_default(self):
+        from djsonapi.api import GetManyEndpoint
+
+        def handler(request, page__number: int = 1):
+            ...
+
+        ep = GetManyEndpoint("articles", handler)
+        req = RequestFactory().get("/")
+        kwargs, errors = ep._get_kwargs(req, {}, req.GET.dict())
+        assert not errors
+        assert kwargs.get("page__number") == 1
+
 
 class TestCreateOneEndpoint:
     def test_url_no_id(self):

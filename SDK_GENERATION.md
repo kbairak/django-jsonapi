@@ -2,263 +2,196 @@
 
 ## Goal
 
-`./manage.py generate_jsonapi_client` that inspects a `DjsonApi` instance and generates a typed async client SDK for any project using `djsonapi`.
+`./manage.py generate_jsonapi_client` inspects a `DjsonApi` instance and
+generates a typed async client SDK package for it. Most functionality lives in
+the existing `djsonapi_client` runtime; the generated code is a thin typed
+layer on top.
 
 ## Command
 
 ```bash
 ./manage.py generate_jsonapi_client \
-  --language python \
   --output ~/articles_sdk \
   articles.views::api
 ```
 
-- `articles.views::api` → import `articles.views`, get `api` attribute
-- Generator inspects `api._registry` for all types, handlers, params, schemas
+- `articles.views::api` → import `articles.views`, get the `api` attribute
+  (`::attr` may be omitted, defaults to `api`)
+- `djsonapi` must be in `INSTALLED_APPS` for command discovery
+- The output directory *is* the package; its basename must be a valid
+  Python identifier
+- Implementation: `djsonapi/management/commands/generate_jsonapi_client.py`
+  (thin wrapper) + `djsonapi/generator.py` (`generate(api, output_dir)`)
 
-## Generated SDK Structure
+## Generated package layout
 
 ```
 ~/articles_sdk/
-  __init__.py       # ~5 lines: schema JSON blob + SDK(host="", __schema__=SCHEMA)
-  __init__.pyi      # Typed stubs for IDE completion
-  _runtime.py       # Generic runtime (same for all projects, ships with djsonapi)
+  __init__.py      # re-exports: sdk, SDK, resource classes, Collection, Resource
+  resources.py     # generated: TypedDicts, Collection subclasses, Resource subclasses
+  sdk.py           # generated: SDK subclass + module-level `sdk` singleton
   py.typed
-  schemas/
-    articles.create.json
-    articles.edit.json
-    categories.create.json
-    ...
+  _runtime/        # verbatim copy of djsonapi_client/*.py (aiohttp only dep)
+    __init__.py
+    collection.py
+    exceptions.py
+    resource.py
+    sdk.py
 ```
 
-## Runtime (`_runtime.py`)
+No `pyproject.toml` — packaging is up to the user.
 
-Single generic file, identical across all generated SDKs. Ships with the `djsonapi` package and is copied into the SDK output.
+## Runtime hooks (in `djsonapi_client`, backwards compatible)
 
-### `SDK`
+The lazy client behavior is unchanged; generated subclasses opt into stricter
+behavior via ClassVars:
 
-```python
-@dataclass
-class SDK:
-    host: str = ""
-    headers: dict[str, str] | Callable | Callable[[], Awaitable[dict[str, str]]] = field(default_factory=dict)
-    _registry: dict[str, type[Resource]] = field(default_factory=dict)
-    __schema__: dict | None = None
+- **Type conversion** — `Resource._attribute_types: dict[str, Any]` maps
+  attribute names (and `"id"`) to type annotations. On hydrate, values are
+  converted (`datetime.datetime`, `datetime.date`, `datetime.time`,
+  `uuid.UUID`, primitives, `list[...]`, `Optional[...]`). On payload build,
+  values are serialized back (`isoformat`, `str`). Relationship ids are
+  serialized to strings to match server JSON schemas.
+- **Typed relationships** — `Resource._relationship_types:
+  dict[str, tuple[str, bool]]` maps relationship names to
+  `(target_type, plural)`. Plain ids assigned to such fields (e.g.
+  `author=42`) are coerced into proper `{data: {type, id}}` relationship
+  objects instead of being mistaken for attributes.
+- **Capability gating** — `Resource._capabilities: frozenset[str]`
+  (`get_one`/`get_many`/`create`/`edit`/`delete`) and
+  `Resource._relationship_capabilities: dict[str, frozenset[str]] | None`
+  (`fetch`/`add`/`remove`/`reset`). Unsupported operations raise
+  `AttributeError`. Defaults allow everything (lazy client unchanged).
+- **`fetch(relationship)`** — GETs the relationship's `related` link
+  (falling back to `{type}/{id}/{relationship}`), parses the response,
+  updates `self._related[relationship]`, and returns a `Resource` (singular)
+  or a fetched `Collection` (plural, using the target's collection class).
+- **Query translation** — `list(**query)`, `get(id, **query)` and
+  `Collection.filter(**kwargs)` accept dunder-style kwargs and translate
+  them to what the server expects: `filter__x__y` → `filter[x][y]`,
+  `page__n` → `page[n]`, `include__a__b` → `include=a.b` (CSV),
+  `fields__t` → `fields[t]`, `extra__x` → `x`; unknown keys pass through.
+- **Typed collections** — `Collection` is `Generic[T]` and chainable
+  methods return `Self`; `Resource._collection_class` lets generated
+  resources return per-resource `Collection` subclasses.
+- **Sealed registry** — `DjsonApiSdk._resource_classes` (ClassVar, default
+  `None` = open/lazy). When set, `sdk.<attr>` only resolves known resource
+  types (bound per-instance subclasses), anything else raises
+  `AttributeError`.
 
-    def setup(self, host="", headers=None):
-        if host: self.host = host
-        if headers is not None: self.headers = headers
+## Generated code (thin layer)
 
-    def __getattr__(self, name):
-        if self.__schema__ and name not in self.__schema__["resources"]:
-            raise AttributeError(name)
-        typ = self.__schema__["resources"][name]
-        cls = type(name, (Resource,), {"_api": self, "TYPE": typ})
-        self._registry[name] = cls
-        return cls
-```
-
-- `__getattr__` lazily creates Resource subclasses from schema metadata
-- No Python resource class definitions needed in generated code
-- Schema maps class names and lowercase plurals to JSON:API `type` strings (e.g., `"Article"` → `"articles"`, `"articles"` → `"articles"`)
-
-### `Resource`
-
-```python
-class Resource:
-    _api: ClassVar[SDK]
-    TYPE: ClassVar[str]
-
-    @classmethod
-    async def list(cls, **kwargs) -> Collection: ...
-    @classmethod
-    async def filter(cls, **kwargs) -> Collection: ...
-    @classmethod
-    async def get(cls, id=None, **kwargs) -> Resource: ...
-    @classmethod
-    async def create(cls, **kwargs) -> Resource: ...
-    @classmethod
-    async def all(cls) -> AsyncGenerator[Resource]: ...
-
-    async def save(self, *fields: str, **kwargs) -> None: ...
-    async def delete(self) -> None: ...
-    async def reload(self) -> None: ...
-    async def fetch(self, rel_name: str) -> Collection | Resource: ...
-    async def change(self, field: str, value) -> None: ...
-    async def add(self, field: str, values: list) -> None: ...
-    async def remove(self, field: str, values: list) -> None: ...
-    async def reset(self, field: str, values: list) -> None: ...
-```
-
-- Attribute shortcut: `__getattr__` checks `self.attributes`, then `self.related`, then raises
-- `__setattr__` writes to `self.attributes` or `self.related` for known fields
-- HTTP via httpx.AsyncClient
-- Mirrors Transifex `transifex.api.jsonapi.Resource` interface
-
-### `Collection`
+For each resource type discovered from `api.registry`:
 
 ```python
-class Collection:
-    def filter(self, **kwargs) -> Collection: ...
-    def include(self, *rels: str) -> Collection: ...
-    def sort(self, *fields: str) -> Collection: ...
-    def fields(self, *fields: str) -> Collection: ...
-    def page(self, *args, **kwargs) -> Collection: ...
-    def extra(self, **kwargs) -> Collection: ...
+class ArticleQuery(TypedDict, total=False):      # from get_many handler params
+    filter__title__contains: str
+    sort: str
+    page: int
+    include__author: bool
 
-    async def get(self) -> Resource: ...
-    async def all(self) -> AsyncGenerator[Resource]: ...
-    async def __aiter__(self) -> AsyncIterator[Resource]: ...
-    async def __len__(self) -> int: ...
-```
+class ArticleGetQuery(TypedDict, total=False):   # from get_one handler params
+    include__author: bool
 
-- Lazy — no HTTP until iteration or `.get()`
-- Chainable — each method returns new `Collection` with accumulated params
+class ArticleEdit(TypedDict, total=False):       # from _edit_fields
+    title: str | None
+    content: str | None
+    author: int | None
 
-## Generated `__init__.py`
+class ArticleCollection(Collection[Article]):
+    def filter(self, **kwargs: Unpack[ArticleQuery]) -> Self: ...
 
-Minimal Python, schema-driven:
+class Article(Resource):
+    _type: ClassVar[str] = "articles"
+    _attribute_types: ClassVar[dict[str, Any]] = {...}        # from server annotations
+    _relationship_types: ClassVar[dict[str, tuple[str, bool]]] = {...}
+    _capabilities: ClassVar[frozenset[str]] = frozenset({...})
+    _relationship_capabilities: ClassVar[...] = {...}
+    _collection_class: ClassVar = ArticleCollection
 
-```python
-import json
-from ._runtime import SDK
-
-SCHEMA = json.loads(r"""{
-  "resources": {
-    "Article": "articles",
-    "articles": "articles",
-    "Category": "categories",
-    "categories": "categories",
-    "User": "users",
-    "users": "users"
-  },
-  "schemas": {
-    "articles": {
-      "create": { ... JSON Schema ... },
-      "edit": { ... JSON Schema ... }
-    }
-  }
-}""")
-
-sdk = SDK(__schema__=SCHEMA)
-```
-
-No `@register`, no class definitions. Everything comes from the schema blob.
-
-## Generated `__init__.pyi`
-
-Full typed stubs for IDE completion. Generated per-project:
-
-```python
-class _Collection[T]:
-    def filter(self, **kwargs) -> _Collection[T]: ...
-    def include(self, *rels: str) -> _Collection[T]: ...
-    def sort(self, *fields: str) -> _Collection[T]: ...
-    def fields(self, *fields: str) -> _Collection[T]: ...
-    async def get(self) -> T: ...
-    def all(self) -> AsyncGenerator[T]: ...
-    async def __aiter__(self) -> AsyncIterator[T]: ...
-
-class Article:
-    id: int | None
+    id: int
     title: str
-    content: str
-    created_at: datetime
-    author: int
-    categories: list[int]
+    created_at: datetime.datetime
 
     @classmethod
-    async def list(cls, **kwargs) -> _Collection[Article]: ...
+    def list(cls, **query: Unpack[ArticleQuery]) -> ArticleCollection: ...
     @classmethod
-    async def filter(cls, title__contains: str = "",
-                     categories: str = "", sort: str = "",
-                     page: int = 1,
-                     include__author: bool = False,
-                     include__categories: bool = False) -> _Collection[Article]: ...
+    async def get(cls, id: int | str | None = None, **query: Unpack[ArticleGetQuery]) -> Article: ...
     @classmethod
-    async def get(cls, id: int | None = None, **kwargs) -> Article: ...
-    @classmethod
-    async def create(cls, title: str, content: str, author: int,
-                     categories: list[int] | None = None) -> Article: ...
-    @classmethod
-    def all(cls) -> AsyncGenerator[Article]: ...
+    async def create(cls, *, title: str, content: str, author: int | None = None) -> Article: ...
+    async def save(self, *fields: str, force_create: bool = False, **kwargs: Unpack[ArticleEdit]) -> None: ...
 
-    async def save(self, *fields: str, **set_fields) -> None: ...
-    async def delete(self) -> None: ...
-    async def reload(self) -> None: ...
-    async def fetch[T](self, rel_name: str) -> T: ...
-    async def change(self, field: str, value) -> None: ...
-    async def add(self, field: str, values: list) -> None: ...
-    async def remove(self, field: str, values: list) -> None: ...
-    async def reset(self, field: str, values: list) -> None: ...
+    @overload
+    async def fetch(self, relationship: Literal["author"]) -> User: ...
+    @overload
+    async def fetch(self, relationship: Literal["categories"]) -> CategoryCollection: ...
+    @overload
+    async def fetch(self, relationship: str) -> Resource | Collection: ...
+```
 
-class SDK:
-    Article: type[Article]
+Only supported operations get wrappers: no DELETE endpoint → no `delete`
+mention, and the capability flag makes the inherited method raise. `create`
+signatures come from `_create_fields`/`_required_create_fields`; relationship
+fields take plain ids. `fetch` overloads give precise return types per
+relationship (target's `Collection` subclass for plural when the target has a
+list endpoint).
+
+Generated `sdk.py`:
+
+```python
+class SDK(DjsonApiSdk):
+    _resource_classes: ClassVar = {"articles": Article, "users": User, ...}
     articles: type[Article]
-    Category: type[Category]
-    categories: type[Category]
-    User: type[User]
     users: type[User]
 
-    def __init__(self, host: str = "", headers: ... = ...,
-                 __schema__: dict | None = None) -> None: ...
-    def setup(self, host: str = "", headers: ... = ...) -> None: ...
-
-sdk: SDK
+sdk = SDK()
 ```
 
-## Generator (management command)
+## Generator introspection
 
-Lives at `src/djsonapi/management/commands/generate_jsonapi_client.py`.
+`djsonapi/generator.py::_collect` walks `api.registry`:
 
-Steps:
-1. Import the specified module, extract the `DjsonApi` instance
-2. Iterate `api._registry`, group by `type_name`
-3. For each type:
-   - Extract `resource_class` → `_type`, `_attributes`, `_singular_relationships`, `_plural_relationships`, `_create_fields`, `_edit_fields`
-   - Extract filter params from handler signatures (via `handler.__wrapped__`)
-   - Call `Resource.jsonschema_create()` / `.jsonschema_edit()` for JSON schemas
-4. Build schema dict: `{resources: {name: type, ...}, schemas: {type: {create: ..., edit: ...}}}`
-5. Write `__init__.py` with schema blob + `SDK(__schema__=SCHEMA)`
-6. Write `__init__.pyi` with typed stubs
-7. Copy `_runtime.py` from djsonapi package
-8. Write `py.typed`
-9. Write `schemas/*.json`
+- endpoint class → capability (`GetOneEndpoint` → `get_one`, etc.)
+- `return_resource_type` (falls back to payload annotation) → the server
+  `Resource` class → annotations, `_attributes`, `_singular/plural_relationships`,
+  `_create_fields`, `_required_create_fields`, `_edit_fields`
+- `GetManyEndpoint`/`GetOneEndpoint` handler signatures → query TypedDicts
+  (`filter__*`/`page`/`sort`/`include__*`/`fields__*`/`extra__*` params with
+  their annotations, `Literal` supported)
+- relationship endpoints → relationship capabilities; `return_resource_type`
+  + list detection → `fetch` overload targets
 
 ## Usage
 
 ```python
-from articles_sdk import sdk
+from articles_sdk import SDK, sdk
 
-# Global convenience
-sdk.setup(host="https://api.example.com/api", auth="<TOKEN>")
-await sdk.Article.list()
+sdk.setup(host="https://api.example.com/api")
+article = await sdk.articles.get(1)
 
-# Per-user instances
-api = SDK(host="https://api.example.com/api", auth="<USER_TOKEN>")
-await api.Article.filter(title__contains="food")
-
-article = await api.Article.get(1)
-article.title  # IDE completion
-await article.fetch('author')
-await article.save(title="Updated")
+# or per-user instances
+alice = SDK(host="https://api.example.com/api", ...)
 ```
+
+## Tests
+
+- `tests/client/test_typed_features.py` — runtime hooks: conversion,
+  capability gating, `fetch`, query translation, sealed registry
+- `tests/server/test_generate_jsonapi_client.py` — end-to-end: generates a
+  package from an inline API, imports it, exercises it with a mocked aiohttp
+  session
+
+## Server-side parsing notes
+
+- `filter__x__y` handler params accept the bracket form `filter[x][y]`
+  (preferred, matches the OpenAPI spec); the bare suffix form `x__y` is
+  still accepted for backwards compatibility.
+- `page__number`-style handler params are parsed from `page[number]`.
+- Relationship ids must serialize as strings in payloads
+  (`_rel_schema_*` declares `id: {"type": "string"}`).
+- Handler return annotations must be real types for introspection — avoid
+  `from __future__ import annotations` in view modules.
 
 ## Future: TypeScript
 
-Same pattern:
-- `index.ts` with `Proxy` for dynamic resource access
-- `index.d.ts` for IDE completion
-- `schemas/*.json` for validation
-- Generator flag: `--language typescript`
-
-## Future: Multiple instances
-
-```python
-alice = SDK(host="https://api.example.com/api", auth="<ALICE_TOKEN>")
-bob = SDK(host="https://api.example.com/api", auth="<BOB_TOKEN>")
-await alice.Article.list()
-await bob.Article.list()
-```
-
-Each `SDK` instance creates its own Resource subclasses via `__getattr__`, binding `_api` to that instance.
+Same pattern: runtime copy + generated types. Not implemented.

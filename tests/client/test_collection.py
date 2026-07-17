@@ -65,6 +65,7 @@ class TestCollectionFetch:
                 await col.fetch()
                 with mock_get(sdk, payload={"data": []}):
                     await col.fetch(force=True)
+                    assert col._data is not None
                     assert len(col._data) == 0
 
     async def test_fetch_passes_params(self, article_type):

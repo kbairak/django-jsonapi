@@ -926,18 +926,37 @@ class GetManyEndpoint(ReturnsDataMixin, Endpoint):
                     kwargs[param.name] = param.default
             elif param.name.startswith("filter__"):
                 filter_key = param.name[len("filter__") :]
-                raw = rp.pop(filter_key, None)
+                bracket_key = _bracket_name("filter", filter_key)
+                raw = rp.pop(bracket_key, None)
                 if raw is not None:
                     tp = param.annotation if param.annotation != inspect.Parameter.empty else str
                     try:
                         kwargs[param.name] = tp(raw)
                     except ValueError as e:
-                        errors.append(BadRequest(str(e), source={"parameter": filter_key}))
+                        errors.append(BadRequest(str(e), source={"parameter": bracket_key}))
                 elif param.default is inspect.Parameter.empty:
                     errors.append(
                         BadRequest(
-                            f"Missing required parameter: {filter_key}",
-                            source={"parameter": filter_key},
+                            f"Missing required parameter: {bracket_key}",
+                            source={"parameter": bracket_key},
+                        )
+                    )
+                else:
+                    kwargs[param.name] = param.default
+            elif param.name.startswith("page__"):
+                page_key = f"page[{param.name[len('page__'):]}]"
+                raw = rp.pop(page_key, None)
+                if raw is not None:
+                    tp = param.annotation if param.annotation != inspect.Parameter.empty else str
+                    try:
+                        kwargs[param.name] = tp(raw)
+                    except ValueError as e:
+                        errors.append(BadRequest(str(e), source={"parameter": page_key}))
+                elif param.default is inspect.Parameter.empty:
+                    errors.append(
+                        BadRequest(
+                            f"Missing required parameter: {page_key}",
+                            source={"parameter": page_key},
                         )
                     )
                 else:
