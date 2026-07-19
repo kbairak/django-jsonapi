@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal, Union, get_args, get_origin
+from types import NoneType, UnionType
 
 from djsonapi.api import (
     AddToRelationshipEndpoint,
@@ -29,7 +30,6 @@ from djsonapi.api import (
     ExpectsPayloadMixin,
     GetManyEndpoint,
     GetOneEndpoint,
-    GetRelatedResourceEndpoint,
     RemoveFromRelationshipEndpoint,
     ResetRelationshipEndpoint,
 )
@@ -49,6 +49,9 @@ class _TypeSpec:
     query_params: list[inspect.Parameter] = field(default_factory=list)
     get_query_params: list[inspect.Parameter] = field(default_factory=list)
     pk_type: type = str
+    allowed_sparse: dict[str, set[str]] = field(default_factory=dict)
+    get_include_types: set[str] = field(default_factory=set)
+    find_include_types: set[str] = field(default_factory=set)
 
     @property
     def class_name(self) -> str:
@@ -156,9 +159,12 @@ def _collect(api: DjsonApi) -> dict[str, _TypeSpec]:
             spec.capabilities.add("get_one")
             spec.get_query_params = _query_params_of(endpoint)
             spec.pk_type = endpoint.pk_type
+            spec.get_include_types = endpoint.allowed_includes
         elif isinstance(endpoint, GetManyEndpoint):
             spec.capabilities.add("get_many")
             spec.query_params = _query_params_of(endpoint)
+            spec.allowed_sparse = endpoint.allowed_sparse
+            spec.find_include_types = endpoint.allowed_includes
         elif isinstance(endpoint, CreateOneEndpoint):
             spec.capabilities.add("create")
         elif isinstance(endpoint, EditOneEndpoint):
@@ -167,25 +173,24 @@ def _collect(api: DjsonApi) -> dict[str, _TypeSpec]:
         elif isinstance(endpoint, DeleteOneEndpoint):
             spec.capabilities.add("delete")
             spec.pk_type = endpoint.pk_type
-        elif isinstance(endpoint, GetRelatedResourceEndpoint):
-            rel = endpoint.relationship_name
-            spec.rel_capabilities.setdefault(rel, set()).add("fetch")
-            target_class = endpoint.return_resource_type
-            plural = _returns_list(endpoint)
-            if target_class is not None:
-                spec_for(target_class._type, target_class)
-                spec.rel_targets[rel] = (target_class._type, plural)
-            else:
-                rel_types = dict(spec.resource_class._singular_relationships)
-                rel_types.update(spec.resource_class._plural_relationships)
-                if rel in rel_types:
-                    spec.rel_targets[rel] = (rel_types[rel], plural)
-        elif isinstance(endpoint, (EditRelationshipEndpoint, ResetRelationshipEndpoint)):
+        elif isinstance(endpoint, EditRelationshipEndpoint):
+            spec.rel_capabilities.setdefault(endpoint.relationship_name, set()).add("edit")
+        elif isinstance(endpoint, ResetRelationshipEndpoint):
             spec.rel_capabilities.setdefault(endpoint.relationship_name, set()).add("reset")
         elif isinstance(endpoint, AddToRelationshipEndpoint):
             spec.rel_capabilities.setdefault(endpoint.relationship_name, set()).add("add")
         elif isinstance(endpoint, RemoveFromRelationshipEndpoint):
             spec.rel_capabilities.setdefault(endpoint.relationship_name, set()).add("remove")
+
+    for spec in specs.values():
+        cls = spec.resource_class
+        if cls is not None:
+            for field, target in cls._singular_relationships:
+                spec_for(target, None)
+                spec.rel_targets.setdefault(field, (target, False))
+            for field, target in cls._plural_relationships:
+                spec_for(target, None)
+                spec.rel_targets.setdefault(field, (target, True))
 
     return specs
 
@@ -258,34 +263,100 @@ def _render_resource_class(
     for attr in cls._attributes:
         body.append(f"{attr}: {renderer.render(annotations.get(attr, Any))}")
 
+    for rel, target in sorted(spec.rel_targets.items()):
+        if target is not None and target[0] in specs:
+            target_name = specs[target[0]].class_name
+            if target[1]:
+                ret = f"{target_name}Collection" if "get_many" in specs[target[0]].capabilities else f"Collection[{target_name}]"
+            else:
+                nullable = _is_optional(annotations.get(rel))
+                ret = f"{target_name} | None" if nullable else target_name
+        elif target is not None:
+            ret = f'Collection["{target[0].capitalize()}"]' if target[1] else "Resource | None"
+        else:
+            ret = "Any" if not target[1] else "Collection[Any]"
+        body.append(f"{rel}: {ret}")
+
     if "get_many" in spec.capabilities:
         body += [
             "",
             "@classmethod",
-            f"def list(cls, **query: Unpack[{query_name}]) -> {collection_name}:",
-            f"    return cast({collection_name}, super().list(**query))",
+            f"def list(cls) -> {collection_name}:",
+            f"    return cast({collection_name}, super().list())",
         ]
 
     if "get_one" in spec.capabilities:
         pk = renderer.render(spec.pk_type)
         id_annotation = "str | None" if pk == "str" else f"{pk} | str | None"
+        has_get_filter_params = any(p.name.startswith("filter__") for p in spec.get_query_params)
+        if has_get_filter_params:
+            get_query = f"Unpack[{get_query_name}]"
+        else:
+            get_query = "Any"
+        get_includes = sorted(spec.get_include_types)
+        if get_includes:
+            renderer.imports.add("from typing import Literal")
+            includes_literal = ', '.join(f'"{inc}"' for inc in sorted(get_includes))
+            body += [
+                "",
+                "@overload",
+                "@classmethod",
+                f"async def get(cls, id: int | str, *includes: Literal[{includes_literal}]) -> {name}: ...",
+            ]
         body += [
             "",
+            "@overload",
             "@classmethod",
-            "async def get(",
-            f"    cls, id: {id_annotation} = None, **query: Unpack[{get_query_name}]",
-            f") -> {name}:",
-            f"    return cast({name}, await super().get(id, **query))",
+            f"async def get(cls, id: int | str, *includes: str) -> {name}: ...",
+            "@classmethod",
+            f"async def get(cls, id: {id_annotation} = None, *includes: str, **query: {get_query}) -> {name}:",
+            f"    return cast({name}, await super().get(id, *includes, **query))",
+        ]
+
+    if "get_many" in spec.capabilities:
+        find_includes = sorted(spec.find_include_types)
+        if find_includes:
+            renderer.imports.add("from typing import Literal")
+            includes_literal = ', '.join(f'"{inc}"' for inc in sorted(find_includes))
+            body += [
+                "",
+                "@overload",
+                "@classmethod",
+                f"async def find(cls, *includes: Literal[{includes_literal}], **query: Unpack[{query_name}]) -> {name}: ...",
+            ]
+        body += [
+            "",
+            "@overload",
+            "@classmethod",
+            f"async def find(cls, *includes: str, **query: Unpack[{query_name}]) -> {name}: ...",
+            "@classmethod",
+            f"async def find(cls, *includes: str, **query: Unpack[{query_name}]) -> {name}:",
+            f"    return cast({name}, await super().find(*includes, **query))",
         ]
 
     if "create" in spec.capabilities:
+        singular_rels = dict(cls._singular_relationships)
+        plural_rels = dict(cls._plural_relationships)
         required, optional = [], []
         for f in cls._create_fields:
             annotation = annotations.get(f, Any)
-            if f in cls._required_create_fields:
-                required.append((f, renderer.render(annotation)))
+            raw = renderer.render(annotation)
+
+            if f in singular_rels and singular_rels[f] in specs:
+                target_name = specs[singular_rels[f]].class_name
+                rendered = f"{target_name} | {raw}"
+            elif f in plural_rels and plural_rels[f] in specs:
+                target_name = specs[plural_rels[f]].class_name
+                rendered = f"list[{target_name} | {raw}]"
             else:
-                optional.append((f, renderer.render_optional(annotation)))
+                rendered = raw
+
+            if f in cls._required_create_fields:
+                required.append((f, rendered))
+            else:
+                if rendered != "Any" and "None" not in rendered.split(" | "):
+                    rendered = f"{rendered} | None"
+                optional.append((f, rendered))
         params = [f"{f}: {tp}" for f, tp in required]
         params += [f"{f}: {tp} = None" for f, tp in optional]
         signature = f"cls, *, {', '.join(params)}" if params else "cls"
@@ -316,41 +387,91 @@ def _render_resource_class(
             "    await super().save(*fields, force_create=force_create, **kwargs)",
         ]
 
-    fetch_rels = [
+    edit_rels = [
         (rel, spec.rel_targets.get(rel))
         for rel, ops in sorted(spec.rel_capabilities.items())
-        if "fetch" in ops
+        if "edit" in ops
     ]
-    if fetch_rels:
+    if edit_rels:
         renderer.imports.add("from typing import Literal")
         body.append("")
-        for rel, target in fetch_rels:
+        for rel, target in edit_rels:
             if target is not None and target[0] in specs:
                 target_name = specs[target[0]].class_name
-                if target[1]:
-                    if "get_many" in specs[target[0]].capabilities:
-                        ret: str = f"{target_name}Collection"
-                    else:
-                        ret = f"Collection[{target_name}]"
-                else:
-                    ret = target_name
-            elif target is not None:
-                ret = f'Collection["{target[0].capitalize()}"]' if target[1] else "Resource"
+                target_type = f"{target_name} | int"
             else:
-                ret = "Any"
+                target_type = "Any"
             body += [
                 "@overload",
-                f'async def fetch(self, relationship: Literal["{rel}"]) -> {ret}: ...',
+                f'async def edit(self, relationship: Literal["{rel}"], resource: {target_type}) -> None: ...',
             ]
         body += [
             "@overload",
-            "async def fetch(self, relationship: str) -> Resource | Collection: ...",
-            "async def fetch(self, relationship: str) -> Any:",
-            "    return await super().fetch(relationship)",
+            "async def edit(self, relationship: str, resource: Any) -> None: ...",
+            "async def edit(self, relationship: str, resource: Any) -> None:",
+            "    return await super().edit(relationship, resource)",
         ]
+
+    for cap in ("add", "remove", "reset"):
+        rels = [
+            (rel, spec.rel_targets.get(rel))
+            for rel, ops in sorted(spec.rel_capabilities.items())
+            if cap in ops
+        ]
+        if rels:
+            renderer.imports.add("from typing import Literal")
+            body.append("")
+            for rel, target in rels:
+                if target is not None and target[0] in specs:
+                    target_name = specs[target[0]].class_name
+                    target_type = f"{target_name} | int"
+                else:
+                    target_type = "Any"
+                body += [
+                    "@overload",
+                    f'async def {cap}(self, relationship: Literal["{rel}"], *resources: {target_type}) -> None: ...',
+                ]
+            body += [
+                "@overload",
+                f"async def {cap}(self, relationship: str, *resources: Any) -> None: ...",
+                f"async def {cap}(self, relationship: str, *resources: Any) -> None:",
+                f"    return await super().{cap}(relationship, *resources)",
+            ]
 
     lines += _indent(body)
     return lines
+
+
+def _is_optional(tp: type | None) -> bool:
+    if tp is None:
+        return True
+    origin = get_origin(tp)
+    return origin in (Union, UnionType) and NoneType in get_args(tp)
+
+
+def _strip_prefix(name: str) -> str:
+    for prefix in ("filter__", "page__", "extra__"):
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
+def _sparse_literal(type_name: str, specs: dict[str, _TypeSpec], renderer: _Renderer) -> str | None:
+    target = specs.get(type_name)
+    if target is None:
+        return None
+    cls = target.resource_class
+    field_names: list[str] = ["id"] if "id" in cls.__annotations__ else []
+    field_names.extend(cls._attributes)
+    for f, _ in cls._singular_relationships:
+        field_names.append(f)
+    for f, _ in cls._plural_relationships:
+        field_names.append(f)
+    if not field_names:
+        return None
+    lit = "Literal[" + ", ".join(repr(f) for f in field_names) + "]"
+    renderer.imports.add("from typing import Literal")
+    return f"list[{lit}]"
 
 
 def _render_resources(specs: dict[str, _TypeSpec]) -> str:
@@ -359,10 +480,12 @@ def _render_resources(specs: dict[str, _TypeSpec]) -> str:
 
     for spec in specs.values():
         query_entries = [
-            (p.name, renderer.render(p.annotation)) for p in spec.query_params
+            (_strip_prefix(p.name), renderer.render(p.annotation))
+            for p in spec.query_params
+            if p.name.startswith("filter__")
         ]
         get_entries = [
-            (p.name, renderer.render(p.annotation)) for p in spec.get_query_params
+            (_strip_prefix(p.name), renderer.render(p.annotation)) for p in spec.get_query_params
         ]
         if "get_many" in spec.capabilities:
             sections.append("\n".join(_render_typed_dict(f"{spec.class_name}Query", query_entries)))
@@ -371,20 +494,77 @@ def _render_resources(specs: dict[str, _TypeSpec]) -> str:
                 "\n".join(_render_typed_dict(f"{spec.class_name}GetQuery", get_entries))
             )
         if "edit" in spec.capabilities:
-            annotations = spec.resource_class._annotations()
-            edit_entries = [
-                (f, renderer.render_optional(annotations.get(f, Any)))
-                for f in spec.resource_class._edit_fields
-            ]
+            cls = spec.resource_class
+            annotations = cls._annotations()
+            singular_rels = dict(cls._singular_relationships)
+            plural_rels = dict(cls._plural_relationships)
+            edit_entries = []
+            for f in spec.resource_class._edit_fields:
+                if f in singular_rels and singular_rels[f] in specs:
+                    target_name = specs[singular_rels[f]].class_name
+                    rendered = f"{target_name} | {renderer.render(annotations.get(f, Any))} | None"
+                elif f in plural_rels and plural_rels[f] in specs:
+                    target_name = specs[plural_rels[f]].class_name
+                    rendered = f"list[{target_name}] | {renderer.render(annotations.get(f, Any))} | None"
+                else:
+                    rendered = renderer.render_optional(annotations.get(f, Any))
+                edit_entries.append((f, rendered))
             sections.append("\n".join(_render_typed_dict(f"{spec.class_name}Edit", edit_entries)))
 
     for spec in specs.values():
         if "get_many" in spec.capabilities:
-            sections.append(
+            sort_param = next((p for p in spec.query_params if p.name == "sort"), None)
+            sort_param = next((p for p in spec.query_params if p.name == "sort"), None)
+            sort_lines = []
+            if sort_param is not None:
+                annotation = sort_param.annotation
+                if annotation is not inspect.Parameter.empty:
+                    origin = get_origin(annotation)
+                    args = get_args(annotation)
+                    if origin is Literal:
+                        rendered = renderer.render(annotation)
+                        sort_lines.append(f"    def sort(self, *fields: {rendered}) -> Self:")
+                        sort_lines.append("        return super().sort(*fields)")
+                    elif origin is list and args:
+                        item_origin = get_origin(args[0])
+                        item_args = get_args(args[0])
+                        if item_origin is Literal:
+                            rendered = renderer.render(args[0])
+                            sort_lines.append(f"    def sort(self, *fields: {rendered}) -> Self:")
+                            sort_lines.append("        return super().sort(*fields)")
+            fields_lines = []
+            if spec.allowed_sparse:
+                fields_params = sorted(
+                    (name, _sparse_literal(name, specs, renderer))
+                    for name in spec.allowed_sparse
+                )
+                fields_params = [(name, lit) for name, lit in fields_params if lit is not None]
+                if fields_params:
+                    args = ", ".join(f"{name}: {lit} | None = None" for name, lit in fields_params)
+                    fields_lines.append(f"    def fields(self, *, {args}) -> Self:")
+                    fields_lines.append("        kwargs = {}")
+                    for name, _ in fields_params:
+                        fields_lines.append("        if " + name + " is not None:")
+                        fields_lines.append("            kwargs[" + repr(name) + "] = " + name)
+                    fields_lines.append("        return super().fields(**kwargs)")
+            filter_params = [p for p in spec.query_params if p.name.startswith("filter__")]
+            filter_lines = []
+            if filter_params:
+                filter_lines.append(
+                    f"    def filter(self, **kwargs: Unpack[{spec.class_name}Query]) -> Self:"
+                )
+                filter_lines.append(
+                    "        return super().filter(**kwargs)"
+                )
+            body = (
                 f'class {spec.class_name}Collection(Collection["{spec.class_name}"]):\n'
-                f"    def filter(self, **kwargs: Unpack[{spec.class_name}Query]) -> Self:\n"
-                f"        return super().filter(**kwargs)"
+                + "\n".join(filter_lines)
             )
+            if sort_lines:
+                body += "\n" + "\n".join(sort_lines)
+            if fields_lines:
+                body += "\n" + "\n".join(fields_lines)
+            sections.append(body)
 
     for spec in specs.values():
         sections.append("\n".join(_render_resource_class(spec, specs, renderer)))
@@ -437,10 +617,14 @@ def _render_init(specs: dict[str, _TypeSpec]) -> str:
     names = sorted(spec.class_name for spec in specs.values())
     all_names = sorted(names + ["Collection", "Resource", "SDK", "sdk"])
     return (
+        "import logging\n"
+        "\n"
         "from ._runtime.collection import Collection\n"
         "from ._runtime.resource import Resource\n"
         f"from .resources import {', '.join(names)}\n"
         "from .sdk import SDK, sdk\n"
+        "\n"
+        "logger = logging.getLogger(__name__)\n"
         "\n"
         f"__all__ = {all_names!r}\n"
     )

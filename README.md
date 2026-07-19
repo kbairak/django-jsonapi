@@ -95,6 +95,17 @@ def edit_article(request, article_id: int, payload: ArticleResource) -> ArticleR
     return ArticleResource(id=article.id, title=article.title, ...)
 
 
+> [!NOTE]
+> For `PATCH` endpoints, resource fields that were not included in the request
+> body are set to `Resource.UNSET`. Check `payload.field is not Resource.UNSET`
+> before applying an update, or use the `UNSET` sentinel to skip fields:
+
+```python
+if payload.title is not Resource.UNSET and article.title != payload.title:
+    article.title = payload.title
+```
+
+
 @api.delete_one("articles")
 def delete_article(request, article_id: int) -> None:
     Article.objects.get(id=article_id).delete()
@@ -240,10 +251,10 @@ Response: `204 No Content`, no body.
 ## Relationships
 
 The library auto-derives relationship endpoints. If you register a
-`get_related_resource`, it generates the `/relationship/` URLs for you.
+`get_related`, it generates the `/relationship/` URLs for you.
 
 ```python
-@api.get_related_resource("articles", "author")
+@api.get_related("articles", "author")
 def get_article_author(request, article_id: int) -> UserResource:
     article = Article.objects.get(id=article_id)
     user = article.author
@@ -487,18 +498,32 @@ Resource classes), parameter descriptions, and tags.
 
 # Client
 
-Two flavours: a **generic async client** for one-off scripts, and a **typed
-generated SDK** for production use.
+## SDK Generation
 
-## Generic client (`djsonapi_client`)
+Generate a client package that knows every type, every operation, every query
+parameter:
+
+```bash
+./manage.py generate_jsonapi_client articles.views::api --output ~/articles_sdk
+```
+
+(`djsonapi` must be in `INSTALLED_APPS`. `articles.views::api` is the import
+path to your `DjsonApi` instance.)
+
+The result is a **self-contained Python package** — only dependency is
+`aiohttp`. It copies `djsonapi_client` as its `_runtime/` sub-package.
+
+## Usage
 
 ```python
-from djsonapi_client import DjsonApiSdk
+from articles_sdk import sdk
 
-sdk = DjsonApiSdk(host="http://localhost:8000/api/")
 async with sdk:
-    article = await sdk.articles.get(1)
-    print(article.title)
+    # IDE completion for everything. Every method, every filter, every field.
+    article = await sdk.articles.get(1, include__author=True)
+    print(article.title)          # str
+    print(article.created_at)     # datetime — auto-converted from ISO string
+
     await article.save(title="New title")
     await article.delete()
 ```
@@ -512,8 +537,8 @@ GET /api/articles/1 HTTP/1.1
 Accept: application/vnd.api+json
 ```
 
-→ Parses the JSON:API response, creates a `Resource` with attributes accessible
-as `article.title`, `article.author` (relationship stubs).
+→ Parses the JSON:API response, creates a typed Resource with attributes
+accessible as `article.title`, `article.author` (relationship stubs).
 
 **`article.save(title="New title")`**:
 
@@ -543,18 +568,37 @@ Accept: application/vnd.api+json
 ```python
 async with sdk:
     # Returns a lazy Collection — no HTTP request yet
-    articles = sdk.articles.list(
-        filter__title__contains="json",
-        page=2,
-        sort="-created_at",
-    )
+    articles = sdk.articles.list()
 
-    # Triggers: GET /api/articles?filter[title][contains]=json&page=2&sort=-created_at
+    # Conditionally build the query before fetching
+    if query:
+        articles = articles.filter(title__contains=query)
+    if page:
+        articles = articles.page(page)
+    if sort_by:
+        articles = articles.sort(sort_by)
+
+    # Only now fetch — triggers the GET
     for article in await articles:
         print(article.title)
 ```
 
-Collections are immutable and chainable:
+`await`ing a collection triggers the fetch and returns the filled collection:
+
+```python
+articles = await sdk.articles.list()
+# articles is now fetched — can index, slice, iterate
+print(articles[0])
+```
+
+Trying to access an unfetched collection raises `RuntimeError`:
+
+```python
+articles = sdk.articles.list()
+print(articles[0])  # RuntimeError: not fetched yet
+```
+
+Collections are immutable and chainable — every method returns a new instance:
 
 ```python
 # Chaining creates new Collection instances without fetching
@@ -572,10 +616,12 @@ async for a in paged:
 
 ```python
 async with sdk:
-    col = sdk.articles.list(page=1)
+    col = await sdk.articles.list().page(1)
 
-    if col.has_next:
-        next_page = await col.get_next()  # GET with page=2
+    if col.has_next():
+        next_page = col.get_next()
+        async for a in await next_page:
+            ...
 
     # Or iterate ALL pages
     async for page in col.all_pages():
@@ -587,18 +633,95 @@ async with sdk:
         print(article.title)
 ```
 
-### Relationships on the client
+### Relationships
+
+When a resource has a relationship, you access it as a regular attribute.
+Whether that attribute is immediately usable depends on whether the
+relationship was **included** in the response. If it wasn't, the attribute
+is an *unfetched* stub — it only knows its own ID, so accessing its fields
+raises an error until you `await` it.
+
+#### Singular relationships (`author`)
 
 ```python
 async with sdk:
-    article = await sdk.articles.get(1, include__author=True)
-    # article.author is already populated from `included`
+    # ── Without include ──────────────────────────────────────────────
+    article = await sdk.articles.get(1)
+    # article.relationships["author"] = {"data": {"type": "users", "id": "42"}}
+    # article.author → an unfetched User stub (only knows id=42)
 
-    author = await article.fetch("author")
-    # GET /api/articles/1/author → returns full User resource
+    print(article.author.username)
+    # ❌ AttributeError — no attributes fetched yet
 
-    categories = await article.fetch("categories")
-    # GET /api/articles/1/categories → returns Collection
+    await article.author  # GET /api/articles/1/author  (or /users/42)
+    # article.author is now a fully-fetched User
+
+    print(article.author.username)  # ✅ "jdoe"
+
+    # ── With include ─────────────────────────────────────────────────
+    article = await sdk.articles.get(1, "author")
+    # article.author is fully populated from the `included` payload
+
+    print(article.author.username)  # ✅ "jdoe"
+
+    await article.author  # ✅ Harmless — already fetched, does nothing
+
+    await article.author.refetch()
+    # ✅ Always hits the network, even if already fetched.
+    # Useful if you want to ensure you have the latest data.
+```
+
+#### Plural relationships (`categories`)
+
+Plural relationships behave the same way, but return a `Collection`
+instead of a single resource. `await`-ing the collection triggers
+the fetch from the server.
+
+```python
+async with sdk:
+    # ── Without include ──────────────────────────────────────────────
+    article = await sdk.articles.get(1)
+    # article.categories → an unfetched Collection (no data yet)
+
+    categories = await article.categories  # GET /api/articles/1/categories
+    # categories is now a fetched Collection[Category]
+
+    for cat in categories:
+        print(cat.name)
+
+    # ── With include ─────────────────────────────────────────────────
+    article = await sdk.articles.get(1, "categories")
+    # article.categories is a pre-populated Collection
+
+    for cat in article.categories:
+        print(cat.name)  # ✅  Works immediately
+
+    await article.categories  # ✅ Harmless — already fetched
+
+    await article.categories.refetch()
+    # ✅ Always hits the network, replaces in-place.
+```
+
+#### Finding a single resource by filter (`find`)
+
+```python
+async with sdk:
+    user = await sdk.users.find(username="admin")
+    # GET /api/users?filter[username]=admin  → asserts exactly 1 result
+
+    # You can also include related resources:
+    article = await sdk.articles.find(
+        title__contains="django",
+        "author", "categories",
+    )
+    # GET /api/articles?filter[title][contains]=django&include=author,categories
+```
+
+#### Mutating relationships
+
+```python
+async with sdk:
+    article = await sdk.articles.get(1)
 
     await article.add("categories", 3, 5)
     # POST /api/articles/1/relationship/categories
@@ -606,19 +729,28 @@ async with sdk:
 
     await article.remove("categories", 3)
     # DELETE /api/articles/1/relationship/categories
-    # Body: {"data": [{"type": "categories", "id": "3"}]}
 
     await article.reset("categories", 5, 7)
-    # PATCH /api/articles/1/relationship/categories
-    # Body: {"data": [{"type": "categories", "id": "5"}, {"type": "categories", "id": "7"}]}
+    # PATCH /api/articles/1/relationship/categories  (replaces all)
+
+    await article.edit("author", 2)
+    # PATCH /api/articles/1/relationship/author  (singular, replaces one)
+
+    # After mutation, the local relationship is invalidated.
+    # The next `await` fetches fresh data from the server:
+    await article.categories  # GET /api/articles/1/categories
 ```
+
+Only supported operations are available. If you didn't register
+`add_to_relationship("articles", "categories")`, calling
+`article.add("categories", ...)` raises `AttributeError` **at import time**.
 
 ### Error handling
 
 HTTP errors raise typed exceptions:
 
 ```python
-from djsonapi_client.exceptions import NotFound, Unauthorized
+from articles_sdk.exceptions import NotFound
 
 try:
     article = await sdk.articles.get(999)
@@ -640,49 +772,6 @@ except NotFound:
 
 Unknown status codes get a dynamic `Http{N}` class.
 
-## Typed generated SDK
-
-The real magic. Once your server is running, generate a client package that
-knows every type, every operation, every query parameter:
-
-```bash
-./manage.py generate_jsonapi_client articles.views::api --output ~/articles_sdk
-```
-
-(`djsonapi` must be in `INSTALLED_APPS`. `articles.views::api` is the import
-path to your `DjsonApi` instance.)
-
-The result is a **self-contained Python package** — only dependency is
-`aiohttp`. It copies `djsonapi_client` as its `_runtime/` sub-package.
-
-### Using the generated SDK
-
-```python
-from articles_sdk import sdk
-
-async with sdk:
-    # IDE completion for everything. Every method, every filter, every field.
-
-    # Parameter names use __ → bracket translation (same as server)
-    article = await sdk.articles.get(1, include__author=True)
-    article.title          # str
-    article.created_at     # datetime — auto-converted from ISO string
-
-    # Typed filters
-    col = sdk.articles.list(filter__title__contains="json")
-    async for a in col:
-        print(a.title)
-
-    # Typed relationships
-    author = await article.fetch("author")     # → User (typed!)
-    categories = await article.fetch("categories")  # → CategoryCollection
-
-    # Only supported operations are available
-    await article.save(title="New title")       # Works if PATCH is registered
-    await article.delete()                       # Works if DELETE is registered
-    # sdk.articles.get(...) missing? → AttributeError at import time, not 404 at runtime
-```
-
 ### Capability gating
 
 The generated SDK reflects exactly what your server supports:
@@ -696,19 +785,6 @@ The generated SDK reflects exactly what your server supports:
 
 This is enforced at the **class level** — capabilities are `frozenset` members
 on resource classes, set during SDK generation.
-
-### Per-relationship capabilities
-
-```python
-# If you registered:
-#   @api.add_to_relationship("articles", "categories") ...
-#   @api.remove_from_relationship("articles", "categories") ...
-# But NOT reset_relationship:
-
-article.add("categories", 5)       # ✓ Works
-article.remove("categories", 5)    # ✓ Works
-article.reset("categories", [5])   # ✗ AttributeError
-```
 
 ### Type conversions
 

@@ -93,16 +93,20 @@ async def edit_article(request, article_id: int, payload: Article) -> Article: .
 async def delete_article(request, article_id: int) -> None: ...
 
 
-@api.get_related_resource("articles", "author")
+@api.get_related("articles", "author")
 async def get_article_author(request, article_id: int) -> User: ...
 
 
-@api.get_related_resource("articles", "categories")
+@api.get_related("articles", "categories")
 async def get_article_categories(request, article_id: int) -> list[Category]: ...
 
 
 @api.add_to_relationship("articles", "categories")
 async def add_article_categories(request, article_id: int, category_ids: list[int]) -> None: ...
+
+
+@api.get_many("categories")
+async def list_categories(request) -> list[Category]: ...
 
 
 @api.get_one("users")
@@ -191,10 +195,10 @@ class TestGeneratedLayout:
         from typing import get_type_hints
 
         article_hints = get_type_hints(resources.ArticleQuery)
-        assert article_hints["filter__title__contains"] is str
-        assert article_hints["page"] is int
+        assert article_hints["title__contains"] is str
+        assert "page" not in article_hints
         assert "title" in get_type_hints(resources.ArticleEdit)
-        assert get_type_hints(resources.UserQuery)["page"] is int
+        assert get_type_hints(resources.UserQuery) == {}
 
     def test_module_singleton(self, generated):
         assert isinstance(generated.sdk, generated.SDK)
@@ -210,12 +214,10 @@ class TestGeneratedCapabilities:
     def test_no_wrapper_for_unsupported(self, resources):
         assert "create" not in resources.User.__dict__
         assert "save" not in resources.User.__dict__
-        assert "fetch" not in resources.Category.__dict__
 
     def test_relationship_capabilities(self, resources):
         assert resources.Article._relationship_capabilities == {
-            "author": frozenset({"fetch"}),
-            "categories": frozenset({"fetch", "add"}),
+            "categories": frozenset({"add"}),
         }
 
     async def test_unsupported_ops_raise(self, generated):
@@ -245,9 +247,11 @@ class TestGeneratedBehavior:
         body = {"data": [], "links": {}, "meta": {}}
         async with sdk:
             with patch_session(sdk, "get", payload=body) as mock_get:
-                await sdk.articles.list(
-                    filter__title__contains="foo", page=2, include__author=True
-                ).fetch()
+                col = sdk.articles.list()
+                col = col.filter(title__contains="foo")
+                col = col.page(2)
+                col = col.include("author")
+                await col
         _, kwargs = mock_get.call_args
         assert kwargs["params"] == {
             "filter[title][contains]": "foo",
@@ -257,8 +261,8 @@ class TestGeneratedBehavior:
 
     async def test_collection_filter_chainable(self, generated):
         sdk = make_sdk(generated)
-        collection = sdk.articles.list(page=1)
-        filtered = collection.filter(filter__title__contains="x")
+        collection = sdk.articles.list().page(1)
+        filtered = collection.filter(title__contains="x")
         assert type(filtered).__name__.endswith("Collection")
         assert filtered._params["filter[title][contains]"] == "x"
         assert filtered._params["page"] == "1"
@@ -297,20 +301,24 @@ class TestGeneratedBehavior:
         }
         async with sdk:
             with patch_session(sdk, "get", payload={"data": user_payload}):
-                user = await article.fetch("author")
+                user = await article.author
         assert isinstance(user, sdk.users)
         assert user.username == "jdoe"
 
     async def test_fetch_plural_returns_collection(self, generated):
         sdk = make_sdk(generated)
-        article = sdk.create(article_payload())
+        payload = article_payload()
+        payload["relationships"]["categories"] = {
+            "links": {"related": f"{HOST}/articles/1/categories"},
+        }
+        article = sdk.create(payload)
         body = {
             "data": [{"type": "categories", "id": "10", "attributes": {"name": "c"}}],
             "links": {},
         }
         async with sdk:
             with patch_session(sdk, "get", payload=body):
-                result = await article.fetch("categories")
+                result = await article.categories
         assert len(result) == 1
         assert result[0].name == "c"
 

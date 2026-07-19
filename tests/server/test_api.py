@@ -520,16 +520,16 @@ class TestDeleteOneEndpoint:
 
 class TestGetRelatedResourceEndpoint:
     def test_url_includes_pk_and_relationship_name(self):
-        from djsonapi.api import GetRelatedResourceEndpoint
+        from djsonapi.api import GetRelatedEndpoint
 
-        ep = GetRelatedResourceEndpoint("articles", lambda r, aid: None, relationship_name="author")
+        ep = GetRelatedEndpoint("articles", lambda r, aid: None, relationship_name="author")
         assert "<str:aid>" in ep.url
         assert "author" in ep.url
 
     def test_url_name(self):
-        from djsonapi.api import GetRelatedResourceEndpoint
+        from djsonapi.api import GetRelatedEndpoint
 
-        ep = GetRelatedResourceEndpoint("articles", lambda r, aid: None, relationship_name="author")
+        ep = GetRelatedEndpoint("articles", lambda r, aid: None, relationship_name="author")
         assert ep.url_name == "articles__author__related"
 
 
@@ -714,7 +714,7 @@ class TestDjsonApiRegistry:
 
         api = DjsonApi()
 
-        @api.get_related_resource("articles", "author")
+        @api.get_related("articles", "author")
         def view(request, aid: int): ...
 
         assert len(api.registry) == 1
@@ -735,7 +735,7 @@ class TestDjsonApiRegistry:
 
         api = DjsonApi()
 
-        @api.get_related_resource("articles", "author")
+        @api.get_related("articles", "author")
         def get_author(request, aid: int): ...
 
         api.urls  # triggers _auto_derive_relationship_endpoints
@@ -752,7 +752,7 @@ class TestDjsonApiRegistry:
 
         api = DjsonApi()
 
-        @api.get_related_resource("articles", "author")
+        @api.get_related("articles", "author")
         def get_author(request, aid: int): ...
 
         @api.get_relationship("articles", "author")
@@ -1321,7 +1321,7 @@ class TestBuildOpenapiSpec:
 
         api = DjsonApi()
 
-        @api.get_related_resource("articles", "author")
+        @api.get_related("articles", "author")
         def get_author(request, article_id: int) -> UserResource:
             return UserResource(id=1)
 

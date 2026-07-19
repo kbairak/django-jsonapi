@@ -1,5 +1,5 @@
 import datetime
-from typing import ClassVar
+from typing import ClassVar, Self
 
 from djsonapi import Resource
 
@@ -20,29 +20,36 @@ class Article(Resource):
     author: int
     categories: list[int] | None = None
 
+    @classmethod
+    def from_model(cls, article) -> Self:
+        return cls(
+            id=article.id,
+            title=article.title,
+            content=article.content,
+            author=article.author_id,
+            created_at=article.created_at,
+        )
+
 
 class Category(Resource):
     _type: ClassVar = "categories"
-    _attributes: ClassVar = ["name", "slug", "description", "created_at"]
+    _attributes: ClassVar = ["name", "created_at"]
     _plural_relationships: ClassVar = ["articles"]
-    _create_fields: ClassVar = ["name", "slug", "description"]
-    _required_create_fields: ClassVar = ["name", "slug"]
-    _edit_fields: ClassVar = ["name", "slug", "description"]
+    _create_fields: ClassVar = ["name"]
+    _required_create_fields: ClassVar = ["name"]
+    _edit_fields: ClassVar = ["name"]
 
     id: int
     name: str
-    slug: str
     created_at: datetime.datetime | None = None
-    description: str = ""
     articles: list[int] | None = None
 
 
 class User(Resource):
     _type: ClassVar = "users"
-    _attributes: ClassVar = ["username", "email"]
+    _attributes: ClassVar = ["username"]
     _plural_relationships: ClassVar = ["articles"]
 
     id: int
     username: str
-    email: str
     articles: list[int] | None = None

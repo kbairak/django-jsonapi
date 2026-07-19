@@ -3,15 +3,13 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, Self, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Self, cast, overload
 from urllib.parse import parse_qs, urlparse
 
 if TYPE_CHECKING:
     from .resource import Resource
 
 logger = logging.getLogger(__name__)
-
-T = TypeVar("T", bound="Resource", default="Resource")
 
 
 def _csv(value: Any) -> str:
@@ -64,7 +62,7 @@ def translate_query(query: dict[str, Any]) -> dict[str, str]:
 
 
 @dataclass
-class Collection(Generic[T], Sequence):
+class Collection[T: "Resource"](Sequence):
     _sdk: Any = field(repr=False)
     _url: str = field(repr=False)
     _params: dict[str, str] = field(default_factory=dict, repr=False)
@@ -79,9 +77,9 @@ class Collection(Generic[T], Sequence):
             url_params = {k: v[0] for k, v in parse_qs(parsed.query).items()}
             self._params = {**url_params, **self._params}
 
-    async def fetch(self, force=False):
-        if self._data is not None and not force:
-            return
+    async def _fetch(self) -> Self:
+        if self._data is not None:
+            return self
         assert self._sdk._session is not None
         logger.debug("GET %s params=%s", self._url, self._params)
         async with self._sdk._session.get(self._url, params=self._params) as response:
@@ -91,19 +89,37 @@ class Collection(Generic[T], Sequence):
             self._data = cast(list[T], self._sdk._parse_response(body))
             self._links = body.get("links", {})
             self.meta = body.get("meta", {})
+        return self
 
-    def __getitem__(self, index: int) -> T:
+    async def refetch(self) -> None:
+        self._data = None
+        await self._fetch()
+
+    def __await__(self):
+        return self._fetch().__await__()
+
+    @overload
+    def __getitem__(self, index: int) -> T: ...
+    @overload
+    def __getitem__(self, index: slice) -> list[T]: ...
+    def __getitem__(self, index: int | slice) -> T | list[T]:
         if self._data is None:
-            raise RuntimeError("Data not fetched yet. Call 'await collection.fetch()' first.")
+            raise RuntimeError("Data not fetched yet. Use 'await collection' first.")
         return self._data[index]
 
     def __len__(self) -> int:
         if self._data is None:
-            raise RuntimeError("Data not fetched yet. Call 'await collection.fetch()' first.")
+            raise RuntimeError("Data not fetched yet. Use 'await collection' first.")
         return len(self._data)
 
     def filter(self, **kwargs: Any) -> Self:
-        return self.__class__(self._sdk, self._url, {**self._params, **translate_query(kwargs)})
+        prefixed = {}
+        for k, v in kwargs.items():
+            if k.startswith("filter__"):
+                prefixed[k] = v
+            else:
+                prefixed[f"filter__{k}"] = v
+        return self.__class__(self._sdk, self._url, {**self._params, **translate_query(prefixed)})
 
     def include(self, *names: str) -> Self:
         return self.__class__(
@@ -154,11 +170,11 @@ class Collection(Generic[T], Sequence):
         return self.__class__(self._sdk, self._links["last"], self._params)
 
     async def all_pages(self) -> AsyncIterator[Self]:
-        current_page = self
+        current_page = await self._fetch()
         while True:
             yield current_page
             if current_page.has_next():
-                current_page = current_page.get_next()
+                current_page = await current_page.get_next()._fetch()
             else:
                 break
 
@@ -168,7 +184,7 @@ class Collection(Generic[T], Sequence):
                 yield item
 
     async def __aiter__(self) -> AsyncIterator[T]:
-        await self.fetch()
+        await self._fetch()
         assert self._data is not None
         for item in self._data:
             yield item

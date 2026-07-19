@@ -56,13 +56,13 @@ class TestResourceGet:
     async def test_get_without_id_filters(self, article_type):
         async with article_type._sdk:
             with mock_get(article_type._sdk, payload={"data": []}):
-                with pytest.raises(ValueError):
+                with pytest.raises(TypeError):
                     await article_type.get()
 
     async def test_get_passes_query_params(self, article_type):
         async with article_type._sdk:
             with mock_get(article_type._sdk, payload={"data": {"type": "articles", "id": "1"}}):
-                article = await article_type.get("1", include="author")
+                article = await article_type.get(1, "author")
                 assert article.id == "1"
 
 

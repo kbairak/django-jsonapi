@@ -256,5 +256,5 @@ class TestHttpIntegration:
                 },
             ):
                 with pytest.raises(InternalServerError) as exc_info:
-                    await col.fetch()
+                    await col
                 assert exc_info.value.detail == "Something broke"

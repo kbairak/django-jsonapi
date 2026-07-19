@@ -1,505 +1,216 @@
+from typing import Literal
+
+from django.db import IntegrityError
 from django.http import HttpRequest
 
 from djsonapi.api import DjsonApi
-from djsonapi.exceptions import BadRequest, Conflict, NotFound
-from djsonapi.response import Response
+from djsonapi.exceptions import Conflict, NotFound
 
 from .models import Article as ArticleModel
 from .models import Category as CategoryModel
 from .models import User as UserModel
-from .resources import (
-    Article as ArticleResource,
-)
-from .resources import (
-    Category as CategoryResource,
-)
-from .resources import (
-    User as UserResource,
-)
-
-# Utils
-
-
-async def _article_to_resource(article: ArticleModel, include_categories=False) -> ArticleResource:
-    return ArticleResource(
-        id=article.id,
-        title=article.title,
-        content=article.content,
-        created_at=article.created_at,
-        author=article.author_id,
-        categories=[c.id async for c in article.categories.all()] if include_categories else None,
-    )
-
-
-async def _category_to_resource(category: CategoryModel) -> CategoryResource:
-    return CategoryResource(
-        id=category.id,
-        name=category.name,
-        slug=category.slug,
-        description=category.description,
-        created_at=category.created_at,
-        articles=[a.id async for a in category.articles.all()],
-    )
-
-
-# API
-
+from .resources import Article as ArticleResource
+from .resources import Category as CategoryResource
+from .resources import User as UserResource
 
 api = DjsonApi()
 
 
-# ── ArticleModel ───────────────────────────────────────────────────────────
+# Articles
 
 
-@api.get_one(
-    "articles", errors=[BadRequest, NotFound], include_types=(UserResource, CategoryResource)
-)
-async def get_article(
-    request: HttpRequest,
-    article_id: int,
-    include__author: bool = False,
-    include__categories: bool = False,
-) -> Response[ArticleResource]:
-    try:
-        qs = ArticleModel.objects.all()
-        if include__author:
-            qs = qs.select_related("author")
-        if include__categories:
-            qs = qs.prefetch_related("categories")
-        article = await qs.aget(id=article_id)
-    except ArticleModel.DoesNotExist:
-        raise NotFound(f"ArticleModel with id '{article_id}' not found")
-    included = list[ArticleResource | UserResource | CategoryResource]()
-    if include__author:
-        included.append(
-            UserResource(
-                id=article.author.pk,
-                username=article.author.username,
-                email=article.author.email,
-            )
-        )
-    if include__categories:
-        async for category in article.categories.all():
-            included.append(await _category_to_resource(category))
-    return Response(
-        data=await _article_to_resource(article, include_categories=True),
-        included=included or None,
-    )
-
-
-@api.get_many("articles", errors=[BadRequest], include_types=(UserResource, CategoryResource))
-async def list_articles(
+@api.get_many("articles")
+def get_articles(
     request: HttpRequest,
     filter__title__contains: str = "",
-    filter__categories: str = "",
-    sort: str = "",
-    page: int = 1,
-    include__author: bool = False,
-    include__categories: bool = False,
-) -> Response[list[ArticleResource]]:
+    filter__category: int | None = None,
+    sort: Literal["title", "-title", "created_at", "-created_at"] = "-created_at",
+) -> list[ArticleResource]:
     qs = ArticleModel.objects.all()
+
+    if sort == "title":
+        qs = qs.order_by("title")
+    elif sort == "-title":
+        qs = qs.order_by("-title")
+    elif sort == "created_at":
+        qs = qs.order_by("created_at")
+    else:
+        qs = qs.order_by("-created_at")
 
     if filter__title__contains:
         qs = qs.filter(title__contains=filter__title__contains)
-    if filter__categories:
-        category_ids = [int(c.strip()) for c in filter__categories.split(",") if c.strip()]
-        if category_ids:
-            qs = qs.filter(categories__in=category_ids)
-    if sort:
-        fields = [f.strip() for f in sort.split(",")]
-        qs = qs.order_by(*fields)
-    else:
-        qs = qs.order_by("id")
+    if filter__category is not None:
+        qs = qs.filter(categories__id=filter__category)
 
-    if include__author:
-        qs = qs.select_related("author")
-    if include__categories:
-        qs = qs.prefetch_related("categories")
-
-    page_size = 10
-    offset = (page - 1) * page_size
-    qs = qs[offset : offset + page_size]
-    links: dict[str, dict[str, str | int]] = {}
-    if page > 1:
-        links["prev"] = {"page": page - 1}
-
-    articles = list[ArticleResource]()
-    users = set[UserResource]()
-    categories_set = set[CategoryResource]()
-
-    async for article in qs:
-        articles.append(
-            await _article_to_resource(article, include_categories=include__categories)
-        )
-        if include__author:
-            users.add(
-                UserResource(
-                    id=article.author.pk,
-                    username=article.author.username,
-                    email=article.author.email,
-                )
-            )
-        if include__categories:
-            async for category in article.categories.all():
-                categories_set.add(await _category_to_resource(category))
-    if len(articles) == page_size:
-        links["next"] = {"page": page + 1}
-
-    included = list[ArticleResource | UserResource | CategoryResource]()
-    if include__author:
-        included.extend(users)
-    if include__categories:
-        included.extend(categories_set)
-
-    return Response(
-        data=articles,
-        included=included or None,
-        links=links,
-    )
+    return [ArticleResource.from_model(article) for article in qs]
 
 
-@api.create_one("articles", errors=[BadRequest])
+@api.get_one("articles", errors=(NotFound,))
+def get_article(request: HttpRequest, article_id: int) -> ArticleResource:
+    try:
+        article = ArticleModel.objects.get(id=article_id)
+    except ArticleModel.DoesNotExist:
+        raise NotFound(f"Article with id '{article_id}' not found")
+    return ArticleResource.from_model(article)
+
+
+@api.create_one("articles", errors=(Conflict,))
 def create_article(request: HttpRequest, payload: ArticleResource) -> ArticleResource:
-    article = ArticleModel.objects.create(
-        title=payload.title, content=payload.content, author_id=payload.author
-    )
-    if payload.categories:
-        article.categories.set(payload.categories)
-    return ArticleResource(
-        id=article.id,
-        title=article.title,
-        content=article.content,
-        created_at=article.created_at,
-        author=article.author_id,
-    )
+    try:
+        article = ArticleModel.objects.create(
+            title=payload.title, content=payload.content, author_id=payload.author
+        )
+    except IntegrityError:
+        raise Conflict()
+    return ArticleResource.from_model(article)
 
 
-@api.edit_one("articles", errors=[BadRequest, NotFound, Conflict])
-async def edit_article(
+@api.edit_one("articles", errors=(NotFound, Conflict))
+def edit_article(
     request: HttpRequest, article_id: int, payload: ArticleResource
 ) -> ArticleResource:
     try:
-        article = await ArticleModel.objects.aget(id=article_id)
+        article = ArticleModel.objects.get(pk=article_id)
     except ArticleModel.DoesNotExist:
-        raise NotFound(f"ArticleModel with id '{article_id}' not found")
-    update_fields: list[str] = []
-    if hasattr(payload, "title"):
+        raise NotFound()
+    if payload.title is not ArticleResource.UNSET and article.title != payload.title:
         article.title = payload.title
-        update_fields.append("title")
-    if hasattr(payload, "content"):
+    if payload.content is not ArticleResource.UNSET and article.content != payload.content:
         article.content = payload.content
-        update_fields.append("content")
-    if hasattr(payload, "author"):
+    if payload.author is not ArticleResource.UNSET and article.author_id != payload.author:
         article.author_id = payload.author
-        update_fields.append("author")
-    if update_fields:
-        await article.asave(update_fields=update_fields)
-    if hasattr(payload, "categories") and payload.categories is not None:
-        await article.categories.aset(payload.categories)
-    return await _article_to_resource(article)
-
-
-@api.delete_one("articles", errors=[NotFound])
-async def delete_article(request: HttpRequest, article_id: int) -> None:
     try:
-        article = await ArticleModel.objects.aget(id=article_id)
+        article.save()
+    except IntegrityError:
+        raise Conflict()
+    return ArticleResource.from_model(article)
+
+
+@api.delete_one("articles", errors=(NotFound,))
+def delete_article(request: HttpRequest, article_id: int) -> None:
+    (count, _) = ArticleModel.objects.filter(pk=article_id).delete()
+    if count == 0:
+        raise NotFound()
+
+
+@api.get_related("articles", "author")
+def get_article_author(request: HttpRequest, article_id: int) -> UserResource:
+    try:
+        article = ArticleModel.objects.get(id=article_id)
     except ArticleModel.DoesNotExist:
-        raise NotFound(f"ArticleModel with id '{article_id}' not found")
-    await article.adelete()
+        raise NotFound(f"Article with id '{article_id}' not found")
+    return get_user(request, article.author_id)
 
 
-# ── ArticleModel Relationships ────────────────────────────────────────────
-
-
-@api.get_related_resource("articles", "author", errors=[BadRequest])
-async def get_article_author(request: HttpRequest, article_id: int) -> UserResource:
+@api.edit_relationship("articles", "author", errors=(NotFound,))
+def edit_article_author(request: HttpRequest, article_id: int, new_author_id: int) -> None:
     try:
-        article = await ArticleModel.objects.select_related("author").aget(id=article_id)
+        article = ArticleModel.objects.get(id=article_id)
     except ArticleModel.DoesNotExist:
-        raise NotFound(f"ArticleModel with id '{article_id}' not found")
-    return UserResource(
-        id=article.author.pk,
-        username=article.author.username,
-        email=article.author.email,
-    )
-
-
-@api.edit_relationship("articles", "author", errors=[BadRequest])
-async def edit_article_author(request: HttpRequest, article_id: int, author_id: int) -> None:
+        raise NotFound(f"Article with id '{article_id}' not found")
     try:
-        article = await ArticleModel.objects.aget(id=article_id)
-    except ArticleModel.DoesNotExist:
-        raise NotFound(f"ArticleModel with id '{article_id}' not found")
-    article.author_id = author_id
-    await article.asave()
-
-
-@api.get_related_resource("articles", "categories", errors=[BadRequest])
-async def get_article_categories(
-    request: HttpRequest,
-    article_id: int,
-    page: int = 1,
-) -> Response[list[CategoryResource]]:
-    try:
-        article = await ArticleModel.objects.prefetch_related("categories").aget(id=article_id)
-    except ArticleModel.DoesNotExist:
-        raise NotFound(f"ArticleModel with id '{article_id}' not found")
-    qs = article.categories.all()
-    page_size = 10
-    offset = (page - 1) * page_size
-    qs = qs[offset : offset + page_size]
-    links: dict[str, dict[str, str | int]] = {}
-    if page > 1:
-        links["prev"] = {"page": page - 1}
-    data = [await _category_to_resource(c) for c in qs]
-    if len(data) == page_size:
-        links["next"] = {"page": page + 1}
-    return Response(
-        data=data,
-        links=links,
-    )
-
-
-@api.reset_relationship("articles", "categories", errors=[BadRequest])
-async def reset_article_categories(
-    request: HttpRequest, article_id: int, category_ids: list[int]
-) -> None:
-    try:
-        article = await ArticleModel.objects.aget(id=article_id)
-    except ArticleModel.DoesNotExist:
-        raise NotFound(f"ArticleModel with id '{article_id}' not found")
-    await article.categories.aset(category_ids)
-
-
-@api.add_to_relationship("articles", "categories", errors=[BadRequest])
-async def add_to_article_categories(
-    request: HttpRequest, article_id: int, category_ids: list[int]
-) -> None:
-    try:
-        article = await ArticleModel.objects.aget(id=article_id)
-    except ArticleModel.DoesNotExist:
-        raise NotFound(f"ArticleModel with id '{article_id}' not found")
-    await article.categories.aadd(*category_ids)
-
-
-@api.remove_from_relationship("articles", "categories", errors=[BadRequest])
-async def remove_from_article_categories(
-    request: HttpRequest, article_id: int, category_ids: list[int]
-) -> None:
-    try:
-        article = await ArticleModel.objects.aget(id=article_id)
-    except ArticleModel.DoesNotExist:
-        raise NotFound(f"ArticleModel with id '{article_id}' not found")
-    await article.categories.aremove(*category_ids)
-
-
-# ── User ──────────────────────────────────────────────────────────────
-
-
-@api.get_one("users", errors=[BadRequest])
-async def get_user(request: HttpRequest, user_id: int) -> UserResource:
-    try:
-        user = await UserModel.objects.aget(id=user_id)
+        new_author = UserModel.objects.get(id=new_author_id)
     except UserModel.DoesNotExist:
-        raise NotFound(f"UserModel with id '{user_id}' not found")
-    return UserResource(id=user.pk, username=user.username, email=user.email)
+        raise NotFound(f"User with id '{new_author_id}' not found")
+
+    article.author = new_author
+    article.save()
 
 
-@api.get_many("users", errors=[BadRequest])
-async def list_users(request: HttpRequest, page: int = 1) -> Response[list[UserResource]]:
-    page_size = 10
-    offset = (page - 1) * page_size
-    links: dict[str, dict[str, str | int]] = {}
-    if page > 1:
-        links["prev"] = {"page": page - 1}
-
-    users = [
-        UserResource(id=user.pk, username=user.username, email=user.email)
-        async for user in UserModel.objects.all()[offset : offset + page_size]
-    ]
-    return Response(data=users, links=links)
-
-
-@api.get_related_resource("users", "articles", errors=[BadRequest])
-async def get_user_articles(
-    request: HttpRequest, user_id: int, page: int = 1
-) -> Response[list[ArticleResource]]:
+def _mutate_article_categories(
+    op: Literal["reset", "add", "remove"], article_id: int, category_ids: list[int]
+) -> None:
     try:
-        user = await UserModel.objects.prefetch_related("articles").aget(id=user_id)
+        article = ArticleModel.objects.get(id=article_id)
+    except ArticleModel.DoesNotExist:
+        raise NotFound(f"Article with id '{article_id}' not found")
+
+    categories = CategoryModel.objects.filter(id__in=category_ids)
+    if missing_category_ids := set(category_ids) - {category.id for category in categories}:
+        raise NotFound(f"Categories with ids '{missing_category_ids}' not found")
+    if op == "reset":
+        article.categories.set(categories)
+    elif op == "add":
+        article.categories.add(*categories)
+    elif op == "remove":
+        article.categories.remove(*categories)
+
+
+@api.reset_relationship("articles", "categories", errors=(NotFound,))
+def reset_article_categories(
+    request: HttpRequest, article_id: int, category_ids: list[int]
+) -> None:
+    _mutate_article_categories("reset", article_id, category_ids)
+
+
+@api.add_to_relationship("articles", "categories", errors=(NotFound,))
+def add_article_categories(request: HttpRequest, article_id: int, category_ids: list[int]) -> None:
+    _mutate_article_categories("add", article_id, category_ids)
+
+
+@api.remove_from_relationship("articles", "categories", errors=(NotFound,))
+def remove_article_categories(
+    request: HttpRequest, article_id: int, category_ids: list[int]
+) -> None:
+    _mutate_article_categories("remove", article_id, category_ids)
+
+
+@api.get_related("articles", "categories")
+def get_article_categories(request: HttpRequest, article_id: int) -> list[CategoryResource]:
+    try:
+        ArticleModel.objects.get(id=article_id)
+    except ArticleModel.DoesNotExist:
+        raise NotFound(f"Article with id '{article_id}' not found")
+    return get_categories(request, filter__article=article_id)
+
+
+# Users
+
+
+@api.get_many("users")
+def get_users(request: HttpRequest, filter__username: str = "") -> list[UserResource]:
+    qs = UserModel.objects.all()
+    if filter__username:
+        qs = qs.filter(username=filter__username)
+    return [UserResource(id=user.pk, username=user.username) for user in qs]
+
+
+@api.get_one("users", errors=(NotFound,))
+def get_user(request: HttpRequest, user_id: int) -> UserResource:
+    try:
+        user = UserModel.objects.get(id=user_id)
     except UserModel.DoesNotExist:
-        raise NotFound(f"UserModel with id '{user_id}' not found")
-    qs = ArticleModel.objects.filter(author_id=user_id)
-    page_size = 10
-    offset = (page - 1) * page_size
-    qs = qs[offset : offset + page_size]
-    links: dict[str, dict[str, str | int]] = {}
-    if page > 1:
-        links["prev"] = {"page": page - 1}
-    data = [await _article_to_resource(article) async for article in qs]
-    if len(data) == page_size:
-        links["next"] = {"page": page + 1}
-    return Response(
-        data=data,
-        links=links,
-    )
+        raise NotFound(f"User with id '{user_id}' not found")
+    return UserResource(id=user.pk, username=user.username)
 
 
-# ── CategoryModel ──────────────────────────────────────────────────────────
+# Categories
 
 
-@api.get_one("categories", errors=[BadRequest, NotFound])
-async def get_category(request: HttpRequest, category_id: int) -> CategoryResource:
-    try:
-        category = await CategoryModel.objects.aget(id=category_id)
-    except CategoryModel.DoesNotExist:
-        raise NotFound(f"CategoryModel with id '{category_id}' not found")
-    return await _category_to_resource(category)
-
-
-@api.get_many("categories", errors=[BadRequest])
-async def list_categories(
-    request: HttpRequest,
-    filter__name__icontains: str = "",
-    filter__slug: str = "",
-    sort: str = "",
-    page: int = 1,
-    include__articles: bool = False,
-) -> Response[list[CategoryResource]]:
+@api.get_many("categories")
+def get_categories(
+    request: HttpRequest, filter__article: int | None = None
+) -> list[CategoryResource]:
     qs = CategoryModel.objects.all()
-
-    if filter__name__icontains:
-        qs = qs.filter(name__icontains=filter__name__icontains)
-    if filter__slug:
-        qs = qs.filter(slug=filter__slug)
-    if sort:
-        fields = [f.strip() for f in sort.split(",")]
-        qs = qs.order_by(*fields)
-    else:
-        qs = qs.order_by("name")
-
-    if include__articles:
-        qs = qs.prefetch_related("articles")
-
-    page_size = 10
-    offset = (page - 1) * page_size
-    qs = qs[offset : offset + page_size]
-    links: dict[str, dict[str, str | int]] = {}
-    if page > 1:
-        links["prev"] = {"page": page - 1}
-
-    categories = list[CategoryResource]()
-    articles = set[ArticleResource]()
-
-    async for category in qs:
-        categories.append(await _category_to_resource(category))
-        if include__articles:
-            async for article in category.articles.all():
-                articles.add(await _article_to_resource(article))
-
-    if len(categories) == page_size:
-        links["next"] = {"page": page + 1}
-
-    return Response(
-        data=categories,
-        included=list(articles) if include__articles else None,
-        links=links,
-    )
+    if filter__article is not None:
+        qs = qs.filter(articles__id=filter__article)
+    return [
+        CategoryResource(id=category.id, name=category.name, created_at=category.created_at)
+        for category in qs
+    ]
 
 
-@api.create_one("categories", errors=[BadRequest])
-async def create_category(request: HttpRequest, payload: CategoryResource) -> CategoryResource:
-    category = await CategoryModel.objects.acreate(
-        name=payload.name,
-        slug=payload.slug,
-        description=payload.description or "",
-    )
-    return await _category_to_resource(category)
-
-
-@api.edit_one("categories", errors=[BadRequest, NotFound, Conflict])
-async def edit_category(
-    request: HttpRequest, category_id: int, payload: CategoryResource
-) -> CategoryResource:
+@api.create_one("categories", errors=(Conflict,))
+def create_category(request: HttpRequest, payload: CategoryResource) -> CategoryResource:
     try:
-        category = await CategoryModel.objects.aget(id=category_id)
-    except CategoryModel.DoesNotExist:
-        raise NotFound(f"CategoryModel with id '{category_id}' not found")
-    update_fields: list[str] = []
-    if hasattr(payload, "name"):
-        category.name = payload.name
-        update_fields.append("name")
-    if hasattr(payload, "slug"):
-        category.slug = payload.slug
-        update_fields.append("slug")
-    if hasattr(payload, "description"):
-        category.description = payload.description or ""
-        update_fields.append("description")
-    if update_fields:
-        await category.asave(update_fields=update_fields)
-    return await _category_to_resource(category)
+        category = CategoryModel.objects.create(name=payload.name)
+    except IntegrityError:
+        raise Conflict()
+    return CategoryResource(id=category.id, name=category.name, created_at=category.created_at)
 
 
-@api.delete_one("categories")
-async def delete_category(request: HttpRequest, category_id: int) -> None:
-    try:
-        category = await CategoryModel.objects.aget(id=category_id)
-    except CategoryModel.DoesNotExist:
-        raise NotFound(f"CategoryModel with id '{category_id}' not found")
-    await category.adelete()
-
-
-@api.get_related_resource("categories", "articles", errors=[BadRequest])
-async def get_category_articles(
-    request: HttpRequest, category_id: int, page: int = 1
-) -> Response[list[ArticleResource]]:
-    try:
-        category = await CategoryModel.objects.prefetch_related("articles").aget(id=category_id)
-    except CategoryModel.DoesNotExist:
-        raise NotFound(f"CategoryModel with id '{category_id}' not found")
-    qs = category.articles.all()
-    page_size = 10
-    offset = (page - 1) * page_size
-    qs = qs[offset : offset + page_size]
-    links: dict[str, dict[str, str | int]] = {}
-    if page > 1:
-        links["prev"] = {"page": page - 1}
-    data = [await _article_to_resource(article) async for article in qs]
-    if len(data) == page_size:
-        links["next"] = {"page": page + 1}
-    return Response(
-        data=data,
-        links=links,
-    )
-
-
-@api.reset_relationship("categories", "articles", errors=[BadRequest])
-async def reset_category_articles(
-    request: HttpRequest, category_id: int, article_ids: list[int]
-) -> None:
-    try:
-        category = await CategoryModel.objects.aget(id=category_id)
-    except CategoryModel.DoesNotExist:
-        raise NotFound(f"CategoryModel with id '{category_id}' not found")
-    await category.articles.aset(article_ids)
-
-
-@api.add_to_relationship("categories", "articles", errors=[BadRequest])
-async def add_category_articles(
-    request: HttpRequest, category_id: int, article_ids: list[int]
-) -> None:
-    try:
-        category = await CategoryModel.objects.aget(id=category_id)
-    except CategoryModel.DoesNotExist:
-        raise NotFound(f"CategoryModel with id '{category_id}' not found")
-    await category.articles.aadd(*article_ids)
-
-
-@api.remove_from_relationship("categories", "articles", errors=[BadRequest])
-async def remove_category_articles(
-    request: HttpRequest, category_id: int, article_ids: list[int]
-) -> None:
-    try:
-        category = await CategoryModel.objects.aget(id=category_id)
-    except CategoryModel.DoesNotExist:
-        raise NotFound(f"CategoryModel with id '{category_id}' not found")
-    await category.articles.aremove(*article_ids)
+@api.delete_one("categories", errors=(NotFound,))
+def delete_category(request: HttpRequest, category_id: int) -> None:
+    count, _ = CategoryModel.objects.filter(pk=category_id).delete()
+    if count == 0:
+        raise NotFound()

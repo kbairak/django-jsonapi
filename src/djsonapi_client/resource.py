@@ -116,6 +116,7 @@ class Resource:
         self.links = {}
         self.meta = {}
         self._related = {}
+        self._fetched = False
 
         if "_data" in kwargs:
             data = kwargs.pop("_data")
@@ -127,6 +128,7 @@ class Resource:
             self.relationships = data.get("relationships", {})
             self.links = data.get("links", {})
             self.__post_init__()
+            self._fetched = bool(data.get("attributes")) or bool(data.get("relationships"))
             return
 
         if "id" in kwargs:
@@ -150,6 +152,7 @@ class Resource:
             "links",
             "meta",
             "_related",
+            "_fetched",
             "_type",
             "_sdk",
         ):
@@ -201,9 +204,11 @@ class Resource:
             if Resource._is_singular(relationship):
                 if relationship["data"] is not None:
                     if self._sdk is not None:
-                        self._related[name] = self._sdk.create(relationship["data"])
+                        r = self._sdk.create(relationship["data"])
                     else:
-                        self._related[name] = Resource(_data=relationship["data"])
+                        r = Resource(_data=relationship["data"])
+                    r.links.setdefault("self", relationship.get("links", {}).get("related"))
+                    self._related[name] = r
                 else:
                     self._related[name] = None
             else:
@@ -215,9 +220,12 @@ class Resource:
                     try:
                         data = [self._sdk.create(item) for item in relationship["data"]]
                     except KeyError:
-                        data = []
+                        data = None
                 else:
-                    data = [Resource(_data=item) for item in relationship.get("data", [])]
+                    if "data" in relationship:
+                        data = [Resource(_data=item) for item in relationship["data"]]
+                    else:
+                        data = None
                 self._related[name] = Collection(self._sdk, url, _data=data)
 
     def _to_related_value(self, value: Any) -> Any:
@@ -375,30 +383,47 @@ class Resource:
         return "data" in relationship and not isinstance(relationship["data"], list)
 
     @classmethod
-    async def get(cls, __id: Any = None, /, **query: Any) -> Resource:
-        if __id is not None:
-            cls._check_capability("get_one")
-            assert cls._sdk._session is not None
-            url = f"{cls._type}/{__id}"
-            params = translate_query(query)
-            logger.debug("GET %s params=%s", url, params or {})
-            async with cls._sdk._session.get(url, params=params) as response:
-                body = await response.json()
-                logger.debug("Response %s: %s", response.status, body)
-                cls._sdk._raise_for_status(response.status, body)
-                return cls._sdk._parse_response(body)
-        col = cls.list(**query)
-        await col.fetch()
-        assert col._data is not None
-        (result,) = col._data
-        return result
+    async def get(cls, __id: Any = None, /, *includes: str, **query: Any) -> Resource:
+        if __id is None:
+            raise TypeError("get() requires an id")
+        cls._check_capability("get_one")
+        assert cls._sdk._session is not None
+        url = f"{cls._type}/{__id}"
+        params = translate_query(query)
+        if includes:
+            params["include"] = ",".join(includes)
+        logger.debug("GET %s params=%s", url, params or {})
+        async with cls._sdk._session.get(url, params=params) as response:
+            body = await response.json()
+            logger.debug("Response %s: %s", response.status, body)
+            cls._sdk._raise_for_status(response.status, body)
+            return cls._sdk._parse_response(body)
 
-    async def refetch(self) -> None:
-        self._check_capability("get_one")
-        try:
-            url = self.links["self"]
-        except KeyError:
-            url = f"{self._type}/{self.id}"
+    @classmethod
+    async def find(cls, *includes: str, **query: Any) -> Resource:
+        if not query:
+            raise TypeError("find() requires filter arguments")
+        col = cls.list()
+        if includes:
+            col = col.include(*includes)
+        col = col.filter(**query)
+        await col
+        assert col._data is not None
+        if len(col._data) != 1:
+            raise ValueError(f"Expected 1 result, got {len(col._data)}")
+        return col._data[0]
+
+    def __await__(self):
+        return self._ensure_fetched().__await__()
+
+    async def _ensure_fetched(self) -> Resource:
+        if self._fetched:
+            return self
+        await self._refetch_impl()
+        return self
+
+    async def _refetch_impl(self) -> None:
+        url = self.links.get("self") or f"{self._type}/{self.id}"
         assert self._sdk._session is not None
         logger.debug("GET %s", url)
         async with self._sdk._session.get(url) as response:
@@ -412,6 +437,11 @@ class Resource:
             self.links = parsed.links
             self.meta = parsed.meta
             self._related = parsed._related
+            self._fetched = True
+
+    async def refetch(self) -> None:
+        self._check_capability("get_one")
+        await self._refetch_impl()
 
     async def delete(self) -> None:
         self._check_capability("delete")
@@ -503,41 +533,9 @@ class Resource:
             self._related = parsed._related
 
     @classmethod
-    def list(cls, **query: Any) -> Collection:
+    def list(cls) -> Collection:
         cls._check_capability("get_many")
-        return cls._collection_class(cls._sdk, f"{cls._type}", translate_query(query))
-
-    async def fetch(self, relationship: str) -> Resource | Collection:
-        """GET the related resource(s) of a relationship and cache them locally.
-
-        Returns a Resource for singular relationships, a fetched Collection for
-        plural ones. Also updates ``self._related[relationship]``.
-        """
-        self._check_relationship_capability(relationship, "fetch")
-        assert self._sdk._session is not None
-        rel = self.relationships.get(relationship) or {}
-        url = rel.get("links", {}).get("related") or f"{self._type}/{self.id}/{relationship}"
-        logger.debug("GET %s", url)
-        async with self._sdk._session.get(url) as response:
-            body = await response.json()
-            logger.debug("Response %s: %s", response.status, body)
-            self._sdk._raise_for_status(response.status, body)
-            parsed = self._sdk._parse_response(body)
-        if isinstance(parsed, list):
-            collection_class: type[Collection] = Collection
-            if parsed:
-                collection_class = type(parsed[0])._collection_class
-            result: Resource | Collection = collection_class(
-                self._sdk,
-                url,
-                _data=parsed,
-                _links=body.get("links", {}),
-                meta=body.get("meta", {}),
-            )
-        else:
-            result = parsed
-        self._related[relationship] = result
-        return result
+        return cls._collection_class(cls._sdk, f"{cls._type}")
 
     def _mutation_ris(self, relationship: str, resources: tuple) -> list[dict]:
         if len(resources) == 1 and isinstance(resources[0], (list, tuple)):
@@ -558,6 +556,38 @@ class Resource:
     async def reset(self, relationship: str, *resources):
         self._check_relationship_capability(relationship, "reset")
         await self._mutate_relationship("PATCH", relationship, self._mutation_ris(relationship, resources))
+
+    async def edit(self, relationship: str, resource: Any) -> None:
+        self._check_relationship_capability(relationship, "edit")
+        ri = self._mutation_ris(relationship, (resource,))[0]
+        assert self._sdk._session is not None
+        assert self.id is not None
+        url = f"{self._type}/{self.id}/relationship/{relationship}"
+        payload = {"data": ri}
+        logger.debug("PATCH %s body=%s", url, payload)
+        async with self._sdk._session.patch(url, json=payload) as response:
+            body = await response.json(content_type=None) if response.status != 204 else {}
+            logger.debug("Response %s", response.status)
+            self._sdk._raise_for_status(response.status, body)
+        rel = self.relationships.setdefault(relationship, {})
+        rel["data"] = ri
+        self._invalidate_related(relationship)
+
+    def _invalidate_related(self, name: str) -> None:
+        if name not in self._related:
+            return
+        rel = self.relationships[name]
+        if Resource._is_singular(rel):
+            ri = rel.get("data")
+            if ri is not None and self._sdk is not None:
+                r = self._sdk.create(ri)
+                r.links.setdefault("self", rel.get("links", {}).get("related"))
+                self._related[name] = r
+            else:
+                self._related[name] = None
+        else:
+            url = rel.get("links", {}).get("related", "")
+            self._related[name] = Collection(self._sdk, url, _data=None)
 
     async def _mutate_relationship(self, method: str, relationship: str, data: list[dict]) -> None:
         assert self._sdk._session is not None
@@ -591,16 +621,4 @@ class Resource:
                     if isinstance(ri, dict) and ri.get("id") not in remove_ids
                 ]
 
-        if relationship in self._related:
-            related = self._related[relationship]
-            if isinstance(related, Collection):
-                existing_resources = list(related._data or [])
-                if method == "PATCH":
-                    related._data = [self._sdk.create(ri) for ri in data]
-                elif method == "POST":
-                    for ri in data:
-                        if not any(e.id == ri["id"] for e in existing_resources):
-                            existing_resources.append(self._sdk.create(ri))
-                else:
-                    remove_ids = {ri["id"] for ri in data}
-                    related._data = [e for e in existing_resources if e.id not in remove_ids]
+        self._invalidate_related(relationship)

@@ -48,6 +48,8 @@ def _type_to_openapi_schema(tp: type) -> dict:
     if origin is list:
         item_tp = args[0] if args else str
         return {"type": "array", "items": _type_to_openapi_schema(item_tp)}
+    if origin is Literal:
+        return {"type": "string", "enum": list(args)}
     return _PYTHON_TO_OPENAPI.get(tp, {"type": "string"})
 
 
@@ -377,6 +379,9 @@ class Endpoint:
         response.status = self.SUCCESS_STATUS
         return response
 
+    def __call__(self, *args, **kwargs) -> Any:
+        return self.handler(*args, **kwargs)
+
 
 class ExpectsIdMixin(Endpoint):
     parameters: ClassVar[list[inspect.Parameter]]
@@ -526,7 +531,7 @@ class ExpectsPayloadMixin(Endpoint):
 
 
 @dataclass(kw_only=True)
-class ReturnsDataMixin(ExpectsIdMixin):
+class ReturnsDataMixin(Endpoint):
     return_annotation: ClassVar
     smart_parameters: ClassVar[Sequence[inspect.Parameter]]
     return_resource_type: ClassVar[type[Resource] | None]
@@ -647,7 +652,9 @@ class ReturnsDataMixin(ExpectsIdMixin):
             expanded.add(inc)
         if forbidden_includes := expanded - self.expected_includes:
             errors.append(
-                BadRequest(f"Invalid include types: {forbidden_includes}", source={"parameter": "include"})
+                BadRequest(
+                    f"Invalid include types: {forbidden_includes}", source={"parameter": "include"}
+                )
             )
         for inc in expanded:
             kwargs[f"include__{inc.replace('.', '__')}"] = True
@@ -928,6 +935,8 @@ class GetManyEndpoint(ReturnsDataMixin, Endpoint):
                 filter_key = param.name[len("filter__") :]
                 bracket_key = _bracket_name("filter", filter_key)
                 raw = rp.pop(bracket_key, None)
+                if raw is None:
+                    raw = rp.pop(filter_key, None)
                 if raw is not None:
                     tp = param.annotation if param.annotation != inspect.Parameter.empty else str
                     try:
@@ -944,8 +953,10 @@ class GetManyEndpoint(ReturnsDataMixin, Endpoint):
                 else:
                     kwargs[param.name] = param.default
             elif param.name.startswith("page__"):
-                page_key = f"page[{param.name[len('page__'):]}]"
+                page_key = f"page[{param.name[len('page__') :]}]"
                 raw = rp.pop(page_key, None)
+                if raw is None:
+                    raw = rp.pop(param.name, None)
                 if raw is not None:
                     tp = param.annotation if param.annotation != inspect.Parameter.empty else str
                     try:
@@ -996,7 +1007,7 @@ class CreateOneEndpoint(ReturnsDataMixin, ExpectsPayloadMixin, Endpoint):
 
 
 @dataclass
-class GetRelatedResourceEndpoint(ReturnsDataMixin, ExpectsRelationshipMixin, Endpoint):
+class GetRelatedEndpoint(ReturnsDataMixin, ExpectsRelationshipMixin, Endpoint):
     METHOD = "GET"
     URL_NAME_TEMPLATE = "{type_name}__{relationship_name}__related"
 
@@ -1087,8 +1098,7 @@ def _validate_content_type(request: HttpRequest) -> None:
         key = param.split("=")[0].strip() if "=" in param else param
         if key not in ("ext", "profile"):
             raise UnsupportedMediaType(
-                f"Unsupported media type parameter '{key}'. "
-                f"Only 'ext' and 'profile' are allowed.",
+                f"Unsupported media type parameter '{key}'. Only 'ext' and 'profile' are allowed.",
                 source={"header": "Content-Type"},
             )
         if key == "ext":
@@ -1211,7 +1221,7 @@ class DjsonApi:
 
         return decorator
 
-    def get_related_resource(
+    def get_related(
         self,
         type_name: str,
         relationship_name: str,
@@ -1223,7 +1233,7 @@ class DjsonApi:
             include_types = []
 
         def decorator(handler: Callable[..., Any]) -> Endpoint:
-            endpoint = GetRelatedResourceEndpoint(
+            endpoint = GetRelatedEndpoint(
                 type_name,
                 handler,
                 errors,
@@ -1318,7 +1328,7 @@ class DjsonApi:
             if isinstance(ep, GetRelationshipEndpoint)
         }
         for ep in list(self.registry):
-            if not isinstance(ep, GetRelatedResourceEndpoint):
+            if not isinstance(ep, GetRelatedEndpoint):
                 continue
             key = (ep.type_name, ep.relationship_name)
             if key in existing:
@@ -1327,7 +1337,7 @@ class DjsonApi:
             existing.add(key)
 
     def _make_auto_relationship_ep(
-        self, related_ep: GetRelatedResourceEndpoint
+        self, related_ep: GetRelatedEndpoint
     ) -> GetRelationshipEndpoint:
         async def _auto_handler(request, **kw):
             raw = related_ep.handler(request, **kw)

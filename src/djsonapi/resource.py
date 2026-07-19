@@ -78,6 +78,7 @@ class Resource:
     _create_fields: ClassVar[list[str]] = []
     _required_create_fields: ClassVar[list[str]] = []
     _edit_fields: ClassVar[list[str]] = []
+    UNSET: ClassVar = object()
 
     @staticmethod
     def _normalize_relationships(
@@ -372,6 +373,17 @@ class Resource:
 
         if fields is None:
             fields = cls._create_fields
+
+        for field in fields:
+            if field == "id":
+                instance.id = cls.UNSET
+            elif field in cls._attributes:
+                setattr(instance, field, cls.UNSET)
+            elif field in cls._rel_names():
+                if field in dict(cls._plural_relationships):
+                    setattr(instance, field, [])
+                else:
+                    setattr(instance, field, cls.UNSET)
 
         for field in fields:
             if field == "id" and "id" in data:

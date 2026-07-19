@@ -186,7 +186,7 @@ class TestFetch:
         }
         async with sdk:
             with patch_session(sdk, "get", payload={"data": user_payload}) as mock_get:
-                user = await article.fetch("author")
+                user = await article.author
         assert isinstance(user, Resource)
         assert user._type == "users"
         assert user.username == "jdoe"
@@ -194,25 +194,30 @@ class TestFetch:
         mock_get.assert_called_once_with(f"{HOST}/articles/1/author")
 
     async def test_fetch_plural(self, sdk, article_payload):
-        article = sdk.create(article_payload)
+        payload = {
+            **article_payload,
+            "relationships": {
+                **article_payload["relationships"],
+                "categories": {
+                    "links": {"related": f"{HOST}/articles/1/categories"},
+                },
+            },
+        }
+        article = sdk.create(payload)
         category_payload = {"type": "categories", "id": "10", "attributes": {"name": "c"}}
         body = {"data": [category_payload], "links": {}, "meta": {}}
         async with sdk:
             with patch_session(sdk, "get", payload=body):
-                result = await article.fetch("categories")
+                result = await article.categories
         assert isinstance(result, Collection)
         assert len(result) == 1
         assert result[0].name == "c"
         assert article._related["categories"] is result
 
     async def test_fetch_blocked(self, sdk, article_payload):
-        article = sdk.articles(_data={
-            "type": "articles",
-            "id": "1",
-            "relationships": {"bogus": {"data": None}},
-        })
-        with pytest.raises(AttributeError, match="'fetch' on relationship 'bogus'"):
-            await article.fetch("bogus")
+        article = sdk.create(article_payload)
+        with pytest.raises(AttributeError, match="'edit' on relationship 'bogus'"):
+            await article.edit("bogus", None)
 
 
 class TestQueryTranslation:
@@ -220,16 +225,14 @@ class TestQueryTranslation:
         body = {"data": [], "links": {}, "meta": {}}
         async with sdk:
             with patch_session(sdk, "get", payload=body) as mock_get:
-                await sdk.articles.list(
-                    filter__title__contains="foo",
-                    page=2,
-                    sort="-created_at",
-                    include__author=True,
-                    include__categories=False,
-                    fields__articles=["title"],
-                    extra__token="abc",
-                    something_custom="y",
-                ).fetch()
+                col = sdk.articles.list()
+                col = col.filter(filter__title__contains="foo")
+                col = col.page(2)
+                col = col.sort("-created_at")
+                col = col.include("author")
+                col = col.fields(articles=["title"])
+                col = col.extra(token="abc", something_custom="y")
+                await col
         _, kwargs = mock_get.call_args
         assert kwargs["params"] == {
             "filter[title][contains]": "foo",
@@ -244,12 +247,12 @@ class TestQueryTranslation:
     async def test_get_translates_include(self, sdk, article_payload):
         async with sdk:
             with patch_session(sdk, "get", payload={"data": article_payload}) as mock_get:
-                await sdk.articles.get(1, include__author=True)
+                await sdk.articles.get(1, "author")
         _, kwargs = mock_get.call_args
         assert kwargs["params"] == {"include": "author"}
 
-    async def test_get_without_id_uses_list(self, sdk, article_payload):
+    async def test_find_uses_list(self, sdk, article_payload):
         async with sdk:
             with patch_session(sdk, "get", payload={"data": [article_payload]}):
-                article = await sdk.articles.get(filter__title="Hello World")
+                article = await sdk.articles.find(title="Hello World")
         assert article.title == "Hello World"
