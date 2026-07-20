@@ -73,12 +73,11 @@ class Resource:
     meta: dict | None = None
     _type: ClassVar[str] = ""
     _attributes: ClassVar[list[str]] = []
-    _singular_relationships: ClassVar[Any] = []
-    _plural_relationships: ClassVar[Any] = []
+    _singular_relationships: ClassVar[list] = []
+    _plural_relationships: ClassVar[list] = []
     _create_fields: ClassVar[list[str]] = []
     _required_create_fields: ClassVar[list[str]] = []
     _edit_fields: ClassVar[list[str]] = []
-    UNSET: ClassVar = object()
 
     @staticmethod
     def _normalize_relationships(
@@ -109,8 +108,6 @@ class Resource:
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         dataclass(cls)
-        cls.__hash__ = Resource.__hash__
-        cls.__eq__ = Resource.__eq__
         cls._singular_relationships = cls._normalize_relationships(
             cls._singular_relationships
         )
@@ -189,6 +186,17 @@ class Resource:
         }
 
     @classmethod
+    def _relationship_properties(cls, fields: set[str]) -> dict[str, dict]:
+        rel_props: dict[str, dict] = {}
+        for field, type_name in cls._singular_relationships:
+            if field in fields:
+                rel_props[field] = cls._rel_schema_singular(type_name)
+        for field, type_name in cls._plural_relationships:
+            if field in fields:
+                rel_props[field] = cls._rel_schema_plural(type_name)
+        return rel_props
+
+    @classmethod
     def _attr_schema(cls, attr_fields: list[str], required_fields: list[str]) -> dict:
         attr_props: dict[str, dict] = {}
         for field in attr_fields:
@@ -217,11 +225,7 @@ class Resource:
             required.append("attributes")
 
         if cls._singular_relationships or cls._plural_relationships:
-            rel_props: dict[str, dict] = {}
-            for field, type_name in cls._singular_relationships:
-                rel_props[field] = cls._rel_schema_singular(type_name)
-            for field, type_name in cls._plural_relationships:
-                rel_props[field] = cls._rel_schema_plural(type_name)
+            rel_props = cls._relationship_properties(cls._rel_names())
             properties["relationships"] = {
                 "type": "object",
                 "properties": rel_props,
@@ -263,13 +267,7 @@ class Resource:
 
         create_rel_fields = create_fields & rel_names
         if create_rel_fields:
-            rel_props: dict[str, dict] = {}
-            for field, type_name in cls._singular_relationships:
-                if field in create_rel_fields:
-                    rel_props[field] = cls._rel_schema_singular(type_name)
-            for field, type_name in cls._plural_relationships:
-                if field in create_rel_fields:
-                    rel_props[field] = cls._rel_schema_plural(type_name)
+            rel_props = cls._relationship_properties(create_rel_fields)
             if rel_props:
                 properties["relationships"] = {
                     "type": "object",
@@ -302,13 +300,7 @@ class Resource:
 
         edit_rel_fields = edit_fields & rel_names
         if edit_rel_fields:
-            rel_props: dict[str, dict] = {}
-            for field, type_name in cls._singular_relationships:
-                if field in edit_rel_fields:
-                    rel_props[field] = cls._rel_schema_singular(type_name)
-            for field, type_name in cls._plural_relationships:
-                if field in edit_rel_fields:
-                    rel_props[field] = cls._rel_schema_plural(type_name)
+            rel_props = cls._relationship_properties(edit_rel_fields)
             if rel_props:
                 properties["relationships"] = {
                     "type": "object",
@@ -323,8 +315,6 @@ class Resource:
             required.append("attributes")
         elif has_rels and not has_attrs:
             required.append("relationships")
-        elif has_attrs and has_rels:
-            pass
 
         result: dict[str, Any] = {
             "type": "object",
@@ -376,14 +366,14 @@ class Resource:
 
         for field in fields:
             if field == "id":
-                instance.id = cls.UNSET
+                instance.id = MISSING
             elif field in cls._attributes:
-                setattr(instance, field, cls.UNSET)
+                setattr(instance, field, MISSING)
             elif field in cls._rel_names():
                 if field in dict(cls._plural_relationships):
                     setattr(instance, field, [])
                 else:
-                    setattr(instance, field, cls.UNSET)
+                    setattr(instance, field, MISSING)
 
         for field in fields:
             if field == "id" and "id" in data:

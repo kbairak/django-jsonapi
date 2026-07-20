@@ -36,12 +36,16 @@ class DjsonApiExceptionSingle(DjsonApiException):
         if detail is None:
             detail = self.DETAIL
         if title is None:
-            if self.TITLE is None:
-                title = _class_name_to_title(self.__class__.__name__)
-            else:
-                title = self.TITLE
+            title = (
+                _class_name_to_title(self.__class__.__name__)
+                if self.TITLE is None
+                else self.TITLE
+            )
         if source is None:
             source = self.SOURCE
+        self.title = title
+        self.detail = detail
+        self.source = source
         super().__init__(title, detail, source)
 
     def render(self):
@@ -50,37 +54,20 @@ class DjsonApiExceptionSingle(DjsonApiException):
         if code is None:
             code = _class_name_to_code(self.__class__.__name__)
 
-        title, detail, source = self.args
-
         result = {
             "status": status,
             "code": code,
-            "title": title,
-            "detail": detail,
+            "title": self.title,
+            "detail": self.detail,
         }
-        if source is not None:
-            result["source"] = source
+        if self.source is not None:
+            result["source"] = self.source
 
         return [result]
 
     @property
     def status(self):
         return int(self.STATUS)
-
-    title = property(
-        fget=lambda self: self.args[0], fset=lambda self, value: self._set(0, value)
-    )
-    detail = property(
-        fget=lambda self: self.args[1], fset=lambda self, value: self._set(1, value)
-    )
-    source = property(
-        fget=lambda self: self.args[2], fset=lambda self, value: self._set(2, value)
-    )
-
-    def _set(self, pos, value):
-        args = list(self.args)
-        args[pos] = value
-        self.args = tuple(args)
 
 
 class DjsonApiExceptionMulti(DjsonApiException):

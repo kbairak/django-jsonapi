@@ -41,6 +41,12 @@ _PYTHON_TO_OPENAPI = {
     bool: {"type": "boolean"},
 }
 
+_PATH_TYPE = {UUID: "uuid", int: "int", str: "str"}
+
+
+def _path_type(pk_type: type) -> str:
+    return _PATH_TYPE[pk_type]
+
 
 def _type_to_openapi_schema(tp: type) -> dict:
     origin = get_origin(tp)
@@ -88,6 +94,35 @@ def _query_param_name(name: str) -> str:
     if name.startswith("extra__"):
         return name[len("extra__") :]
     raise ValueError(f"Unknown query parameter: {name}")
+
+
+def _pop_typed_param(
+    remaining: dict[str, str],
+    param: inspect.Parameter,
+    *,
+    query_name: str,
+    bracket_fallbacks: tuple[str, ...] = (),
+) -> tuple[Any, DjsonApiExceptionSingle | None]:
+    """Pop one typed query parameter, converting/validating against ``param``.
+
+    Tries ``query_name`` then any ``bracket_fallbacks``. Returns ``(value, error)``;
+    ``error`` is ``None`` on success. Honors the parameter default / required-ness.
+    """
+    raw = remaining.pop(query_name, None)
+    for fallback in bracket_fallbacks:
+        if raw is None:
+            raw = remaining.pop(fallback, None)
+    if raw is not None:
+        tp = param.annotation if param.annotation != inspect.Parameter.empty else str
+        try:
+            return tp(raw), None
+        except ValueError as e:
+            return None, BadRequest(str(e), source={"parameter": query_name})
+    if param.default is inspect.Parameter.empty:
+        return None, BadRequest(
+            f"Missing required parameter: {query_name}", source={"parameter": query_name}
+        )
+    return param.default, None
 
 
 def _handler_query_params(handler: Callable) -> list[dict]:
@@ -398,7 +433,7 @@ class ExpectsIdMixin(Endpoint):
 
     @functools.cached_property
     def url(self):
-        path_type = {UUID: "uuid", int: "int", str: "str"}[self.pk_type]
+        path_type = _path_type(self.pk_type)
         return f"{self.type_name}/<{path_type}:{self.pk_name}>"
 
     @functools.cached_property
@@ -642,8 +677,64 @@ class ReturnsDataMixin(Endpoint):
         remaining_params: dict[str, str] | None = None,
     ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
         kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params or {})
+        rp = remaining_params or {}
 
-        request_includes = {r for r in (remaining_params or {}).pop("include", "").split(",") if r}
+        for param in self.smart_parameters:
+            if param.name in ("sort", "page"):
+                raw = rp.pop(param.name, None)
+                if raw is None:
+                    if param.default is inspect.Parameter.empty:
+                        errors.append(
+                            BadRequest(
+                                f"Missing required parameter: {param.name}",
+                                source={"parameter": param.name},
+                            )
+                        )
+                    else:
+                        kwargs[param.name] = param.default
+                elif param.name == "page":
+                    try:
+                        kwargs[param.name] = int(raw)
+                    except ValueError:
+                        errors.append(
+                            BadRequest("page must be an integer", source={"parameter": "page"})
+                        )
+                else:
+                    sort_fields = [s.strip() for s in raw.split(",") if s.strip()]
+                    if get_origin(param.annotation) is Literal:
+                        invalid = [f for f in sort_fields if f not in get_args(param.annotation)]
+                        if invalid:
+                            errors.append(
+                                BadRequest(
+                                    f"Invalid sort fields: {invalid}",
+                                    source={"parameter": "sort"},
+                                )
+                            )
+                            continue
+                    kwargs[param.name] = (
+                        sort_fields if _annotation_is_list(param.annotation) else raw
+                    )
+            elif param.name.startswith("filter__"):
+                filter_key = param.name[len("filter__") :]
+                value, error = _pop_typed_param(
+                    rp,
+                    param,
+                    query_name=_bracket_name("filter", filter_key),
+                    bracket_fallbacks=(filter_key,),
+                )
+                if error is not None:
+                    errors.append(error)
+                else:
+                    kwargs[param.name] = value
+            elif param.name.startswith("page__"):
+                page_key = f"page[{param.name[len('page__'):]}]"
+                value, error = _pop_typed_param(rp, param, query_name=page_key)
+                if error is not None:
+                    errors.append(error)
+                else:
+                    kwargs[param.name] = value
+
+        request_includes = {r for r in rp.pop("include", "").split(",") if r}
         expanded = set()
         for inc in request_includes:
             parts = inc.split(".")
@@ -660,10 +751,10 @@ class ReturnsDataMixin(Endpoint):
             kwargs[f"include__{inc.replace('.', '__')}"] = True
 
         request_sparse: dict[str, set[str]] = {}
-        for key in list(remaining_params or {}):
+        for key in list(rp):
             if m := re.search(r"^fields\[(\w+)\]$", key):
                 request_sparse[m.group(1)] = {
-                    f.strip() for f in (remaining_params or {}).pop(key).split(",") if f.strip()
+                    f.strip() for f in rp.pop(key).split(",") if f.strip()
                 }
         for t in sorted(request_sparse.keys() - self.allowed_sparse.keys()):
             errors.append(
@@ -675,22 +766,11 @@ class ReturnsDataMixin(Endpoint):
 
         for param in self.expected_extra:
             extra_name = param.name[len("extra__") :]
-            raw = (remaining_params or {}).pop(extra_name, None)
-            if raw is not None:
-                tp = param.annotation if param.annotation != inspect.Parameter.empty else str
-                try:
-                    kwargs[param.name] = tp(raw)
-                except ValueError as e:
-                    errors.append(BadRequest(str(e), source={"parameter": extra_name}))
-            elif param.default is inspect.Parameter.empty:
-                errors.append(
-                    BadRequest(
-                        f"Missing required extra parameter: {extra_name}",
-                        source={"parameter": extra_name},
-                    )
-                )
+            value, error = _pop_typed_param(rp, param, query_name=extra_name)
+            if error is not None:
+                errors.append(error)
             else:
-                kwargs[param.name] = param.default
+                kwargs[param.name] = value
 
         return kwargs, errors
 
@@ -841,7 +921,7 @@ class ExpectsRelationshipMixin(ExpectsIdMixin):
 
     @functools.cached_property
     def url(self):
-        path_type = {UUID: "uuid", int: "int", str: "str"}[self.pk_type]
+        path_type = _path_type(self.pk_type)
         return (
             f"{self.type_name}/<{path_type}:{self.pk_name}>/relationship/{self.relationship_name}"
         )
@@ -877,118 +957,12 @@ class GetManyEndpoint(ReturnsDataMixin, Endpoint):
     METHOD = "GET"
     URL_NAME_TEMPLATE = "{type_name}__collection"
 
-    @functools.cached_property
-    def smart_parameters(self) -> list[inspect.Parameter]:
-        return self.parameters[1:]
-
-    @functools.cached_property
-    def url(self):
-        return f"{self.type_name}"
-
-    def _get_kwargs(
-        self,
-        request: HttpRequest,
-        url_kwargs: dict[str, Any],
-        remaining_params: dict[str, str] | None = None,
-    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
-        kwargs, errors = super()._get_kwargs(request, url_kwargs, remaining_params or {})
-        rp = remaining_params or {}
-
-        for param in self.smart_parameters:
-            if param.name in ("sort", "page"):
-                raw = rp.pop(param.name, None)
-                if raw is not None:
-                    if param.name == "page":
-                        try:
-                            kwargs[param.name] = int(raw)
-                        except ValueError:
-                            errors.append(
-                                BadRequest("page must be an integer", source={"parameter": "page"})
-                            )
-                    else:
-                        sort_fields = [s.strip() for s in raw.split(",") if s.strip()]
-                        if get_origin(param.annotation) is Literal:
-                            allowed = get_args(param.annotation)
-                            invalid = [f for f in sort_fields if f not in allowed]
-                            if invalid:
-                                errors.append(
-                                    BadRequest(
-                                        f"Invalid sort fields: {invalid}",
-                                        source={"parameter": "sort"},
-                                    )
-                                )
-                                continue
-                        if _annotation_is_list(param.annotation):
-                            kwargs[param.name] = sort_fields
-                        else:
-                            kwargs[param.name] = raw
-                elif param.default is inspect.Parameter.empty:
-                    errors.append(
-                        BadRequest(
-                            f"Missing required parameter: {param.name}",
-                            source={"parameter": param.name},
-                        )
-                    )
-                else:
-                    kwargs[param.name] = param.default
-            elif param.name.startswith("filter__"):
-                filter_key = param.name[len("filter__") :]
-                bracket_key = _bracket_name("filter", filter_key)
-                raw = rp.pop(bracket_key, None)
-                if raw is None:
-                    raw = rp.pop(filter_key, None)
-                if raw is not None:
-                    tp = param.annotation if param.annotation != inspect.Parameter.empty else str
-                    try:
-                        kwargs[param.name] = tp(raw)
-                    except ValueError as e:
-                        errors.append(BadRequest(str(e), source={"parameter": bracket_key}))
-                elif param.default is inspect.Parameter.empty:
-                    errors.append(
-                        BadRequest(
-                            f"Missing required parameter: {bracket_key}",
-                            source={"parameter": bracket_key},
-                        )
-                    )
-                else:
-                    kwargs[param.name] = param.default
-            elif param.name.startswith("page__"):
-                page_key = f"page[{param.name[len('page__') :]}]"
-                raw = rp.pop(page_key, None)
-                if raw is None:
-                    raw = rp.pop(param.name, None)
-                if raw is not None:
-                    tp = param.annotation if param.annotation != inspect.Parameter.empty else str
-                    try:
-                        kwargs[param.name] = tp(raw)
-                    except ValueError as e:
-                        errors.append(BadRequest(str(e), source={"parameter": page_key}))
-                elif param.default is inspect.Parameter.empty:
-                    errors.append(
-                        BadRequest(
-                            f"Missing required parameter: {page_key}",
-                            source={"parameter": page_key},
-                        )
-                    )
-                else:
-                    kwargs[param.name] = param.default
-
-        return kwargs, errors
-
 
 @dataclass
 class CreateOneEndpoint(ReturnsDataMixin, ExpectsPayloadMixin, Endpoint):
     METHOD = "POST"
     URL_NAME_TEMPLATE = "{type_name}__collection"
     SUCCESS_STATUS: ClassVar[int] = 201
-
-    @functools.cached_property
-    def smart_parameters(self) -> list[inspect.Parameter]:
-        return self.parameters[1:]
-
-    @functools.cached_property
-    def url(self):
-        return f"{self.type_name}"
 
     def _get_payload_schema_fn(self, resource_class: type[Resource]):
         return resource_class.jsonschema_create
@@ -1013,7 +987,7 @@ class GetRelatedEndpoint(ReturnsDataMixin, ExpectsRelationshipMixin, Endpoint):
 
     @functools.cached_property
     def url(self):
-        path_type = {UUID: "uuid", int: "int", str: "str"}[self.pk_type]
+        path_type = _path_type(self.pk_type)
         return f"{self.type_name}/<{path_type}:{self.pk_name}>/{self.relationship_name}"
 
 
@@ -1575,20 +1549,6 @@ class DjsonApi:
 
         for relationship_name, relationship in resource.get("relationships", {}).items():
             related_link = None
-            try:
-                relationship_type = relationship["data"]["type"]
-                relationship_id = relationship["data"]["id"]
-            except Exception:
-                pass
-            else:
-                try:
-                    related_link = reverse(f"{relationship_type}__item", args=(relationship_id,))
-                except (NoReverseMatch, ImproperlyConfigured):
-                    pass
-            try:
-                related_link = reverse(f"{_type}__{relationship_name}__related", args=(_id,))
-            except (NoReverseMatch, ImproperlyConfigured):
-                pass
             try:
                 related_link = reverse(f"{_type}__{relationship_name}__related", args=(_id,))
             except (NoReverseMatch, ImproperlyConfigured):

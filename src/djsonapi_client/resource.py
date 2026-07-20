@@ -202,15 +202,9 @@ class Resource:
     def __post_init__(self) -> None:
         for name, relationship in self.relationships.items():
             if Resource._is_singular(relationship):
-                if relationship["data"] is not None:
-                    if self._sdk is not None:
-                        r = self._sdk.create(relationship["data"])
-                    else:
-                        r = Resource(_data=relationship["data"])
-                    r.links.setdefault("self", relationship.get("links", {}).get("related"))
-                    self._related[name] = r
-                else:
-                    self._related[name] = None
+                self._related[name] = self._related_singular(
+                    relationship.get("data"), relationship.get("links", {})
+                )
             else:
                 try:
                     url = relationship["links"]["related"]
@@ -227,6 +221,18 @@ class Resource:
                     else:
                         data = None
                 self._related[name] = Collection(self._sdk, url, _data=data)
+
+    def _related_singular(
+        self, ri: dict | None, links: dict
+    ) -> Resource | None:
+        if ri is None:
+            return None
+        if self._sdk is not None:
+            r = self._sdk.create(ri)
+        else:
+            r = Resource(_data=ri)
+        r.links.setdefault("self", links.get("related"))
+        return r
 
     def _to_related_value(self, value: Any) -> Any:
         if isinstance(value, Resource):
@@ -286,11 +292,11 @@ class Resource:
             return {"data": [] if plural else None}
         if plural:
             assert isinstance(value, (list, tuple))
-            return {"data": [self._typed_ri(target, item) for item in value]}
-        return {"data": self._typed_ri(target, value)}
+            return {"data": [Resource._to_ri(item, target) for item in value]}
+        return {"data": Resource._to_ri(value, target)}
 
     @staticmethod
-    def _typed_ri(target: str, value: Any) -> dict[str, Any]:
+    def _to_ri(value: Any, target: str | None = None) -> dict[str, Any]:
         if isinstance(value, Resource):
             return {"type": value._type, "id": str(value.id)}
         if isinstance(value, dict):
@@ -305,7 +311,7 @@ class Resource:
         target, plural = self._relationship_types[name]
 
         def stub(item: Any) -> Resource:
-            ri = self._typed_ri(target, item)
+            ri = Resource._to_ri(item, target)
             if self._sdk is not None:
                 cls = getattr(self._sdk, ri["type"])
                 return cls(_data={"type": ri["type"], "id": ri["id"]})
@@ -345,21 +351,13 @@ class Resource:
         if isinstance(value, Resource):
             return {"data": {"type": value._type, "id": value.id}}
         if isinstance(value, (list, tuple)):
-            return {"data": [Resource._as_ri(v) for v in value]}
+            return {"data": [Resource._to_ri(v) for v in value]}
         if isinstance(value, dict):
             if "type" in value and "id" in value:
                 return {"data": value}
             if "data" in value:
                 return value
         return {"data": value}
-
-    @staticmethod
-    def _as_ri(value: Any) -> dict[str, Any]:
-        if isinstance(value, Resource):
-            return {"type": value._type, "id": str(value.id)}
-        if isinstance(value, dict) and "data" in value:
-            return value["data"]
-        return value
 
     @staticmethod
     def _str_relationship_ids(relationship: Any) -> Any:
@@ -542,8 +540,8 @@ class Resource:
             resources = tuple(resources[0])
         if relationship in self._relationship_types:
             target = self._relationship_types[relationship][0]
-            return [Resource._typed_ri(target, r) for r in resources]
-        return [Resource._as_ri(r) for r in resources]
+            return [Resource._to_ri(r, target) for r in resources]
+        return [Resource._to_ri(r) for r in resources]
 
     async def add(self, relationship: str, *resources):
         self._check_relationship_capability(relationship, "add")
@@ -578,13 +576,9 @@ class Resource:
             return
         rel = self.relationships[name]
         if Resource._is_singular(rel):
-            ri = rel.get("data")
-            if ri is not None and self._sdk is not None:
-                r = self._sdk.create(ri)
-                r.links.setdefault("self", rel.get("links", {}).get("related"))
-                self._related[name] = r
-            else:
-                self._related[name] = None
+            self._related[name] = self._related_singular(
+                rel.get("data"), rel.get("links", {})
+            )
         else:
             url = rel.get("links", {}).get("related", "")
             self._related[name] = Collection(self._sdk, url, _data=None)

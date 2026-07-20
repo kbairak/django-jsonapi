@@ -17,8 +17,8 @@ import types
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Any, ClassVar, Literal, Union, get_args, get_origin
 from types import NoneType, UnionType
+from typing import Annotated, Any, ClassVar, Literal, Union, get_args, get_origin
 
 from djsonapi.api import (
     AddToRelationshipEndpoint,
@@ -102,7 +102,7 @@ class _Renderer:
 
     def render_optional(self, tp: Any) -> str:
         rendered = self.render(tp)
-        if rendered != "Any" and "None" not in rendered.split(" | "):
+        if rendered != "Any" and not _is_optional(tp):
             return f"{rendered} | None"
         return rendered
 
@@ -196,7 +196,7 @@ def _collect(api: DjsonApi) -> dict[str, _TypeSpec]:
 
 
 def _indent(lines: list[str], prefix: str = "    ") -> list[str]:
-    return [(prefix + line) if line else "" for line in lines]
+    return [prefix + line if line else "" for line in lines]
 
 
 def _render_typed_dict(name: str, entries: list[tuple[str, str]]) -> list[str]:
@@ -206,6 +206,12 @@ def _render_typed_dict(name: str, entries: list[tuple[str, str]]) -> list[str]:
     else:
         lines.append("    pass")
     return lines
+
+
+def _target_type_for(target: tuple[str, bool] | None, specs: dict[str, _TypeSpec]) -> str:
+    if target is not None and target[0] in specs:
+        return f"{specs[target[0]].class_name} | int"
+    return "Any"
 
 
 def _render_resource_class(
@@ -361,13 +367,7 @@ def _render_resource_class(
         params += [f"{f}: {tp} = None" for f, tp in optional]
         signature = f"cls, *, {', '.join(params)}" if params else "cls"
         body += ["", "@classmethod"]
-        if len(signature) > 80:
-            body.append("async def create(")
-            body += _indent([f"{line}," for line in ["cls", "*", *params]])
-            body[-1] = body[-1].rstrip(",")
-            body.append(f") -> {name}:")
-        else:
-            body.append(f"async def create({signature}) -> {name}:")
+        body.append(f"async def create({signature}) -> {name}:")
         if required:
             kwargs = ", ".join(f'"{f}": {f}' for f, _ in required)
             body.append(f"    kwargs: dict[str, Any] = {{{kwargs}}}")
@@ -396,11 +396,7 @@ def _render_resource_class(
         renderer.imports.add("from typing import Literal")
         body.append("")
         for rel, target in edit_rels:
-            if target is not None and target[0] in specs:
-                target_name = specs[target[0]].class_name
-                target_type = f"{target_name} | int"
-            else:
-                target_type = "Any"
+            target_type = _target_type_for(target, specs)
             body += [
                 "@overload",
                 f'async def edit(self, relationship: Literal["{rel}"], resource: {target_type}) -> None: ...',
@@ -422,11 +418,7 @@ def _render_resource_class(
             renderer.imports.add("from typing import Literal")
             body.append("")
             for rel, target in rels:
-                if target is not None and target[0] in specs:
-                    target_name = specs[target[0]].class_name
-                    target_type = f"{target_name} | int"
-                else:
-                    target_type = "Any"
+                target_type = _target_type_for(target, specs)
                 body += [
                     "@overload",
                     f'async def {cap}(self, relationship: Literal["{rel}"], *resources: {target_type}) -> None: ...',
@@ -514,7 +506,6 @@ def _render_resources(specs: dict[str, _TypeSpec]) -> str:
     for spec in specs.values():
         if "get_many" in spec.capabilities:
             sort_param = next((p for p in spec.query_params if p.name == "sort"), None)
-            sort_param = next((p for p in spec.query_params if p.name == "sort"), None)
             sort_lines = []
             if sort_param is not None:
                 annotation = sort_param.annotation
@@ -527,7 +518,6 @@ def _render_resources(specs: dict[str, _TypeSpec]) -> str:
                         sort_lines.append("        return super().sort(*fields)")
                     elif origin is list and args:
                         item_origin = get_origin(args[0])
-                        item_args = get_args(args[0])
                         if item_origin is Literal:
                             rendered = renderer.render(args[0])
                             sort_lines.append(f"    def sort(self, *fields: {rendered}) -> Self:")
@@ -544,8 +534,8 @@ def _render_resources(specs: dict[str, _TypeSpec]) -> str:
                     fields_lines.append(f"    def fields(self, *, {args}) -> Self:")
                     fields_lines.append("        kwargs = {}")
                     for name, _ in fields_params:
-                        fields_lines.append("        if " + name + " is not None:")
-                        fields_lines.append("            kwargs[" + repr(name) + "] = " + name)
+                        fields_lines.append(f"        if {name} is not None:")
+                        fields_lines.append(f"            kwargs[{name!r}] = {name}")
                     fields_lines.append("        return super().fields(**kwargs)")
             filter_params = [p for p in spec.query_params if p.name.startswith("filter__")]
             filter_lines = []
