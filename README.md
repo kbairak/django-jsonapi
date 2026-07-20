@@ -801,6 +801,53 @@ The SDK reads your resource's type annotations and generates conversion code:
 Conversions are applied on response hydration and reversed on request
 serialization.
 
+### TypeScript SDK
+
+Generate a typed TypeScript SDK instead:
+
+```bash
+./manage.py generate_jsonapi_client articles.views::api \
+    --output ~/articles_sdk_ts \
+    --language typescript
+```
+
+The output is a self-contained TypeScript package — the runtime is copied as
+`_runtime/`, plus generated `resources.ts`, `sdk.ts`, `index.ts`.
+
+```typescript
+import { createSdk } from "./articles_sdk_ts/index.js";
+
+const sdk = createSdk({
+  host: "http://localhost:8000/api/",
+  headers: async () => ({}),
+});
+
+// Typed resource access — full IDE autocomplete
+const admin = await sdk.users.find({ username: "admin" });
+console.log(admin.username);          // getter → "admin"
+
+const article = await sdk.articles.create({
+  title: "Hello from TS!",
+  content: "Generated SDK demo",
+  author: admin,
+});
+console.log(article.title);           // getter → "Hello from TS!"
+
+await article.save({ title: "Updated" });
+await article.refetch();
+
+// Lazy collection with typed filter/sort
+for await (const a of sdk.articles.list().filter({ title__contains: "TS" })) {
+  console.log(a.title, a.author);
+}
+
+// Relationship methods — typed overloads
+const cat = await sdk.categories.create({ name: "TypeScript" });
+await article.add("categories", cat);
+await article.remove("categories", cat);
+await article.delete();
+```
+
 ---
 
 # Installation

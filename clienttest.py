@@ -14,19 +14,12 @@ async def main():
     async with sdk:
         # logging.getLogger("articles_sdk").setLevel(logging.DEBUG)
         admin = await sdk.users.find(username="admin")
-        category1 = await sdk.categories.create(name="one")
-        category2 = await sdk.categories.create(name="two")
-        category3 = await sdk.categories.create(name="three")
-        article = await sdk.articles.create(title="one", content="one", author=admin)
-
-        await article.add("categories", category1, category2)
-        print([c.name async for c in article.categories])
-
-        await article.remove("categories", category2)
-        print([c.name async for c in article.categories])
-
-        await article.reset("categories", category2, category3)
-        print([c.name async for c in article.categories])
+        article = await sdk.articles.create(
+            title="Test Article", content="This is a test article.", author=admin
+        )
+        print(f"1. {article=}")
+        article = await sdk.articles.get(article.id)
+        print(f"2. {article=}")
 
         await delete_all()
 

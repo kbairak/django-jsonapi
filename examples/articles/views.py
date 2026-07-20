@@ -72,7 +72,7 @@ def edit_article(
     try:
         article = ArticleModel.objects.get(pk=article_id)
     except ArticleModel.DoesNotExist:
-        raise NotFound()
+        raise NotFound(f"Article with id '{article_id}' not found")
     if payload.title is not ArticleResource.UNSET and article.title != payload.title:
         article.title = payload.title
     if payload.content is not ArticleResource.UNSET and article.content != payload.content:

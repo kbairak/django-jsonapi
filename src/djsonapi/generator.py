@@ -466,6 +466,25 @@ def _sparse_literal(type_name: str, specs: dict[str, _TypeSpec], renderer: _Rend
     return f"list[{lit}]"
 
 
+def _ts_sparse_fieldset(type_name: str, specs: dict[str, _TypeSpec]) -> str | None:
+    target = specs.get(type_name)
+    if target is None:
+        return None
+    cls = target.resource_class
+    field_names: list[str] = ["id"] if "id" in cls.__annotations__ else []
+    field_names.extend(cls._attributes)
+    for f, _ in cls._singular_relationships:
+        field_names.append(f)
+    for f, _ in cls._plural_relationships:
+        field_names.append(f)
+    if not field_names:
+        return None
+    lit = " | ".join(repr(f) for f in field_names)
+    if len(field_names) == 1:
+        return f"{lit}[]"
+    return f"({lit})[]"
+
+
 def _render_resources(specs: dict[str, _TypeSpec]) -> str:
     renderer = _Renderer()
     sections: list[str] = []
@@ -618,6 +637,468 @@ def _render_init(specs: dict[str, _TypeSpec]) -> str:
         "\n"
         f"__all__ = {all_names!r}\n"
     )
+
+
+# ── TypeScript generator ─────────────────────────────────────────────
+
+
+class _TSRenderer:
+    def render(self, tp: Any) -> str:
+        if tp is inspect.Parameter.empty or tp is None or tp is Any:
+            return "unknown"
+        origin = get_origin(tp)
+        args = get_args(tp)
+        if origin is ClassVar:
+            return self.render(args[0]) if args else "unknown"
+        if origin is Annotated:
+            return self.render(args[0])
+        if origin is Literal:
+            return " | ".join(repr(a) for a in args)
+        if origin in (Union, types.UnionType):
+            return " | ".join(
+                "null" if a is type(None) else self.render(a) for a in args
+            )
+        if origin is list or origin is collections.abc.Sequence:
+            return f"{self.render(args[0]) if args else 'unknown'}[]"
+        if origin is dict:
+            return "Record<string, unknown>"
+        if tp is type(None):
+            return "null"
+        if tp in (str, int, float, bool):
+            return {"str": "string", "int": "number", "float": "number", "bool": "boolean"}[
+                tp.__name__
+            ]
+        if tp is datetime.datetime or tp is datetime.date or tp is datetime.time:
+            return "string"
+        if tp is uuid.UUID:
+            return "string"
+        return "unknown"
+
+    def render_optional(self, tp: Any) -> str:
+        rendered = self.render(tp)
+        if rendered != "unknown" and not _is_optional(tp):
+            return f"{rendered} | null"
+        return rendered
+
+
+def _render_ts_typed_interface(name: str, entries: list[tuple[str, str]]) -> list[str]:
+    if entries:
+        lines = [f"export interface {name} {{"]
+        lines += _indent([f"{key}?: {value};" for key, value in entries])
+        lines.append("}")
+    else:
+        lines = [f"export interface {name} {{}}"]
+    return lines
+
+
+def _ts_target_type(target: tuple[str, bool] | None, specs: dict[str, _TypeSpec]) -> str:
+    if target is not None and target[0] in specs:
+        return f"{specs[target[0]].class_name} | number"
+    return "unknown"
+
+
+def _render_ts_collection_class(
+    spec: _TypeSpec, specs: dict[str, _TypeSpec], renderer: _TSRenderer
+) -> list[str]:
+    name = spec.class_name
+    query_name = f"{name}Query"
+    lines: list[str] = []
+
+    sort_lines: list[str] = []
+    sort_param = next((p for p in spec.query_params if p.name == "sort"), None)
+    if sort_param is not None:
+        annotation = sort_param.annotation
+        if annotation is not inspect.Parameter.empty:
+            origin = get_origin(annotation)
+            args = get_args(annotation)
+            if origin is Literal:
+                lit = " | ".join(repr(a) for a in args)
+                sort_lines.append(f"  sort(...fields: ({lit})[]): this {{")
+                sort_lines.append(f"    return super.sort(...fields);")
+                sort_lines.append(f"  }}")
+            elif origin is list and args:
+                item_origin = get_origin(args[0])
+                if item_origin is Literal:
+                    lit = " | ".join(repr(a) for a in get_args(args[0]))
+                    sort_lines.append(f"  sort(...fields: ({lit})[]): this {{")
+                    sort_lines.append(f"    return super.sort(...fields);")
+                    sort_lines.append(f"  }}")
+
+    fields_lines: list[str] = []
+    if spec.allowed_sparse:
+        fields_params = sorted((n, _ts_sparse_fieldset(n, specs)) for n in spec.allowed_sparse)
+        fields_params = [(n, lit) for n, lit in fields_params if lit is not None]
+        if fields_params:
+            entries = ", ".join(f"{n}?: {lit} | null" for n, lit in fields_params)
+            fields_lines.append(f"  fields(params: {{ {entries} }}): this {{")
+            fields_lines.append("    const converted: Record<string, string[]> = {};")
+            fields_lines.append("    for (const [k, v] of Object.entries(params)) {")
+            fields_lines.append("      if (v != null) converted[k] = v;")
+            fields_lines.append("    }")
+            fields_lines.append("    return super.fields(converted);")
+            fields_lines.append("  }")
+
+    filter_params = [p for p in spec.query_params if p.name.startswith("filter__")]
+    if filter_params:
+        lines.append(f"export class {name}Collection extends Collection<{name}> {{")
+        lines.append(f"  filter(kwargs: Partial<{query_name}>): this {{")
+        lines.append("    return super.filter(kwargs as Record<string, unknown>);")
+        lines.append("  }")
+        if sort_lines:
+            lines += sort_lines
+        if fields_lines:
+            lines += fields_lines
+        lines.append("}")
+    else:
+        body_parts = []
+        body_parts.append(f"export class {name}Collection extends Collection<{name}> {{")
+        if sort_lines:
+            body_parts += sort_lines
+        if fields_lines:
+            body_parts += fields_lines
+        if not sort_lines and not fields_lines:
+            body_parts[-1] = body_parts[-1] + "}" if body_parts else "}"
+        else:
+            body_parts.append("}")
+        lines = body_parts if body_parts else []
+
+    if not filter_params and not sort_lines and not fields_lines:
+        lines = [
+            f"export class {name}Collection extends Collection<{name}> {{",
+            f"}}",
+        ]
+
+    return lines
+
+
+def _render_ts_resource_class(
+    spec: _TypeSpec, specs: dict[str, _TypeSpec], renderer: _TSRenderer
+) -> list[str]:
+    cls = spec.resource_class
+    name = spec.class_name
+    annotations = cls._annotations()
+    query_name = f"{name}Query"
+    edit_name = f"{name}Edit"
+    collection_name = f"{name}Collection"
+
+    lines: list[str] = []
+
+    if "get_many" in spec.capabilities:
+        lines += _render_ts_collection_class(spec, specs, renderer)
+
+    lines.append(f"export class {name} extends Resource {{")
+
+    body: list[str] = []
+    body.append(f'  static _type = "{spec.type_name}";')
+
+    attr_types: dict[str, Any] = {"id": annotations.get("id", spec.pk_type)}
+    for attr in cls._attributes:
+        attr_types[attr] = annotations.get(attr, Any)
+    body.append("  static _attributeTypes: Record<string, string> = {")
+    for key, tp in attr_types.items():
+        body.append(f'    {key!r}: {renderer.render(tp)!r},')
+    body.append("  };")
+
+    rel_entries = list(cls._singular_relationships) + list(cls._plural_relationships)
+    if rel_entries:
+        body.append("  static _relationshipTypes: Record<string, [string, boolean]> = {")
+        for field, target in sorted(spec.rel_targets.items()):
+            body.append(f'    {field!r}: [{target[0]!r}, {str(target[1]).lower()}],')
+        body.append("  };")
+
+    caps = sorted(spec.capabilities)
+    body.append(f"  static _capabilities = new Set({caps!r} as const);")
+
+    for attr in cls._attributes:
+        tp = renderer.render(annotations.get(attr, Any))
+        body.append(f"  get {attr}(): {tp} {{ return this.get({attr!r}) as {tp}; }}")
+        body.append(f"  set {attr}(value: {tp}) {{ this.set({attr!r}, value); }}")
+
+    for rel, target in sorted(spec.rel_targets.items()):
+        if target is not None and target[0] in specs:
+            target_name = specs[target[0]].class_name
+            if target[1]:
+                ret = f"{target_name}Collection | null"
+            else:
+                nullable = _is_optional(annotations.get(rel))
+                ret = f"{target_name} | null" if nullable else target_name
+        elif target is not None:
+            ret = f'Collection<any> | null' if target[1] else "Resource | null"
+        else:
+            ret = "unknown" if not target[1] else "Collection<unknown>"
+        body.append(f"  get {rel}(): {ret} {{ return this.get({rel!r}) as {ret}; }}")
+        body.append(f"  set {rel}(value: {ret}) {{ this.set({rel!r}, value); }}")
+
+    if "get_many" in spec.capabilities:
+        body += [
+            "",
+            f"  static list(): {collection_name} {{",
+            f"    return super.list() as unknown as {collection_name};",
+            "  }",
+        ]
+
+    if "get_one" in spec.capabilities:
+        id_type = "string"
+        get_includes = sorted(spec.get_include_types)
+        if get_includes:
+            includes_literal = " | ".join(f'"{inc}"' for inc in get_includes)
+            if len(get_includes) > 1:
+                includes_literal = f"({includes_literal})"
+            body += [
+                "",
+                f"  static async get(id: {id_type}, ...includes: {includes_literal}[]): Promise<{name}>;",
+            ]
+        body += [
+            "",
+            f"  static async get(id: {id_type}, ...includes: string[]): Promise<{name}> {{",
+            f"    return super.get(id as any, ...includes) as unknown as Promise<{name}>;",
+            "  }",
+        ]
+
+    if "get_many" in spec.capabilities:
+        find_includes = sorted(spec.find_include_types)
+        if find_includes:
+            includes_literal = " | ".join(f'"{inc}"' for inc in find_includes)
+            if len(find_includes) > 1:
+                includes_literal = f"({includes_literal})"
+            body += [
+                "",
+                f"  static async find(query: Partial<{query_name}>, ...includes: {includes_literal}[]): Promise<{name}>;",
+            ]
+        body += [
+            "",
+            f"  static async find(query?: Partial<{query_name}>): Promise<{name}> {{",
+            f"    return super.find(query as Record<string, unknown>) as unknown as Promise<{name}>;",
+            "  }",
+        ]
+
+    if "create" in spec.capabilities:
+        create_name = f"{name}Create"
+        body += [
+            "",
+            f"  static async create(props?: {create_name}): Promise<{name}> {{",
+            f"    return super.create(props as unknown as Record<string, unknown>) as unknown as Promise<{name}>;",
+            "  }",
+        ]
+
+    if "edit" in spec.capabilities:
+        body += [
+            "",
+            f"  async save(props?: {edit_name}): Promise<void> {{",
+            f"    await super.save(props as Record<string, unknown>);",
+            "  }",
+        ]
+
+    edit_rels = [
+        (rel, spec.rel_targets.get(rel))
+        for rel, ops in sorted(spec.rel_capabilities.items())
+        if "edit" in ops
+    ]
+    if edit_rels:
+        body.append("")
+        for rel, target in edit_rels:
+            target_type = _ts_target_type(target, specs)
+            body += [
+                f"  async edit(relationship: {rel!r}, resource: {target_type}): Promise<void>;",
+            ]
+        body += [
+            f"  async edit(relationship: string, resource: unknown): Promise<void> {{",
+            f"    await super.edit(relationship, resource);",
+            "  }",
+        ]
+
+    for cap in ("add", "remove", "reset"):
+        rels = [
+            (rel, spec.rel_targets.get(rel))
+            for rel, ops in sorted(spec.rel_capabilities.items())
+            if cap in ops
+        ]
+        if rels:
+            body.append("")
+            for rel, target in rels:
+                target_type = _ts_target_type(target, specs)
+                arr_type = f"({target_type})" if " | " in target_type else target_type
+                body += [
+                    f"  async {cap}(relationship: {rel!r}, ...resources: {arr_type}[]): Promise<void>;",
+                ]
+            body += [
+                f"  async {cap}(relationship: string, ...resources: unknown[]): Promise<void> {{",
+                f"    await super.{cap}(relationship, ...resources);",
+                "  }",
+            ]
+
+    lines += _indent(body)
+    lines.append("}")
+    return lines
+
+
+def _render_ts_resources(specs: dict[str, _TypeSpec]) -> str:
+    renderer = _TSRenderer()
+    sections: list[str] = []
+
+    query_interfaces: list[str] = []
+    for spec in specs.values():
+        query_entries = [
+            (_strip_prefix(p.name), renderer.render(p.annotation))
+            for p in spec.query_params
+            if p.name.startswith("filter__")
+        ]
+        get_entries = [
+            (_strip_prefix(p.name), renderer.render(p.annotation))
+            for p in spec.get_query_params
+        ]
+        if "get_many" in spec.capabilities:
+            query_interfaces.append(
+                "\n".join(_render_ts_typed_interface(f"{spec.class_name}Query", query_entries))
+            )
+        if "get_one" in spec.capabilities:
+            query_interfaces.append(
+                "\n".join(_render_ts_typed_interface(f"{spec.class_name}GetQuery", get_entries))
+            )
+        if "edit" in spec.capabilities:
+            cls = spec.resource_class
+            annotations = cls._annotations()
+            singular_rels = dict(cls._singular_relationships)
+            plural_rels = dict(cls._plural_relationships)
+            edit_entries: list[tuple[str, str]] = []
+            for f in cls._edit_fields:
+                if f in singular_rels and singular_rels[f] in specs:
+                    target_name = specs[singular_rels[f]].class_name
+                    rendered = f"{target_name} | {renderer.render(annotations.get(f, Any))} | null"
+                elif f in plural_rels and plural_rels[f] in specs:
+                    target_name = specs[plural_rels[f]].class_name
+                    rendered = f"{target_name}[] | {renderer.render(annotations.get(f, Any))} | null"
+                else:
+                    rendered = renderer.render_optional(annotations.get(f, Any))
+                edit_entries.append((f, rendered))
+            query_interfaces.append(
+                "\n".join(_render_ts_typed_interface(f"{spec.class_name}Edit", edit_entries))
+            )
+        if "create" in spec.capabilities:
+            cls = spec.resource_class
+            annotations = cls._annotations()
+            singular_rels = dict(cls._singular_relationships)
+            plural_rels = dict(cls._plural_relationships)
+            create_entries: list[tuple[str, str]] = []
+            for f in cls._create_fields:
+                annotation = annotations.get(f, Any)
+                raw = renderer.render(annotation)
+                # Strip | null — interface field optionality handled via ?
+                if raw.endswith(" | null"):
+                    raw = raw[:-7]
+                if f in singular_rels and singular_rels[f] in specs:
+                    target_name = specs[singular_rels[f]].class_name
+                    rendered = f"{target_name} | {raw}"
+                elif f in plural_rels and plural_rels[f] in specs:
+                    target_name = specs[plural_rels[f]].class_name
+                    rendered = f"({target_name} | {raw})[]"
+                else:
+                    rendered = raw
+                if f in cls._required_create_fields:
+                    create_entries.append((f, rendered))
+                else:
+                    if rendered != "unknown" and "null" not in rendered.split(" | "):
+                        rendered = f"{rendered} | null"
+                    create_entries.append((f, rendered))
+            query_interfaces.append(
+                "\n".join(_render_ts_typed_interface(f"{spec.class_name}Create", create_entries))
+            )
+    sections.append("\n\n".join(query_interfaces))
+
+    for spec in specs.values():
+        sections.append("\n".join(_render_ts_resource_class(spec, specs, renderer)))
+
+    return (
+        'import { Collection } from "./_runtime/collection.js";\n'
+        'import { Resource } from "./_runtime/resource.js";\n'
+        "\n"
+        + "\n\n".join(sections)
+        + "\n"
+    )
+
+
+def _render_ts_sdk(specs: dict[str, _TypeSpec]) -> str:
+    lines = [
+        'import { DjsonApiSdk } from "./_runtime/sdk.js";',
+        'import { Resource } from "./_runtime/resource.js";',
+        'import type { SdkConfig } from "./_runtime/sdk.js";',
+    ]
+    names = sorted(spec.class_name for spec in specs.values())
+    lines.append(f'import {{ {", ".join(names)} }} from "./resources.js";')
+    lines.append("")
+
+    lines.append("export class SDK extends DjsonApiSdk {")
+    lines.append("  static _resourceClasses: Record<string, typeof Resource> = {")
+    for spec in specs.values():
+        lines.append(f'    {spec.type_name!r}: {spec.class_name},')
+    lines.append("  };")
+    lines.append("")
+    for spec in specs.values():
+        lines.append(f"  declare readonly {spec.type_name}: typeof {spec.class_name};")
+    lines.append("}")
+    lines.append("")
+    lines.append("export function createSdk(config: SdkConfig): SDK {")
+    lines.append("  const sdk = new SDK(config);")
+    lines.append("  for (const [typeName, cls] of Object.entries(SDK._resourceClasses)) {")
+    lines.append("    ;(sdk as any)._registry.set(typeName, cls);")
+    lines.append("    cls._sdk = sdk;")
+    lines.append("  }")
+    lines.append("  return new Proxy(sdk, {")
+    lines.append("    get(target, prop, receiver) {")
+    lines.append("      if (prop in target || typeof prop === 'symbol') {")
+    lines.append("        return Reflect.get(target, prop, receiver);")
+    lines.append("      }")
+    lines.append("      return target._getResourceClass(prop as string);")
+    lines.append("    },")
+    lines.append("  }) as SDK;")
+    lines.append("}")
+    return "\n".join(lines) + "\n"
+
+
+def _render_ts_init(specs: dict[str, _TypeSpec]) -> str:
+    names = sorted(spec.class_name for spec in specs.values())
+    lines = [
+        'export { DjsonApiSdk } from "./_runtime/sdk.js";',
+        'export type { SdkConfig, ResourceConstructor, RequestOptions } from "./_runtime/sdk.js";',
+        'export { Resource } from "./_runtime/resource.js";',
+        'export { Collection } from "./_runtime/collection.js";',
+        f'export {{ {", ".join(names)} }} from "./resources.js";',
+    ]
+    for spec in specs.values():
+        n = spec.class_name
+        type_exports = [f"{n}Query"]
+        if "create" in spec.capabilities:
+            type_exports.append(f"{n}Create")
+        if "get_one" in spec.capabilities:
+            type_exports.append(f"{n}GetQuery")
+        if "edit" in spec.capabilities:
+            type_exports.append(f"{n}Edit")
+        lines.append(f'export type {{ {", ".join(type_exports)} }} from "./resources.js";')
+    lines.append(f'export {{ SDK, createSdk }} from "./sdk.js";')
+    return "\n".join(lines) + "\n"
+
+
+def generate_typescript(api: DjsonApi, output_dir: str | Path, package_name: str | None = None) -> Path:
+    """Generate a typed TypeScript SDK for ``api`` into ``output_dir``."""
+    output_dir = Path(output_dir).expanduser().resolve()
+
+    specs = _collect(api)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    _this_file = Path(__file__).resolve()
+    runtime_src = _this_file.parent.parent / "djsonapi_client_ts" / "src"
+    if not runtime_src.is_dir():
+        raise RuntimeError(f"Cannot find djsonapi_client_ts/src at {runtime_src}")
+    runtime_dst = output_dir / "_runtime"
+    if runtime_dst.exists():
+        shutil.rmtree(runtime_dst)
+    shutil.copytree(runtime_src, runtime_dst)
+
+    (output_dir / "resources.ts").write_text(_render_ts_resources(specs))
+    (output_dir / "sdk.ts").write_text(_render_ts_sdk(specs))
+    (output_dir / "index.ts").write_text(_render_ts_init(specs))
+    return output_dir
 
 
 def generate(api: DjsonApi, output_dir: str | Path, package_name: str | None = None) -> Path:

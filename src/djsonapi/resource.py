@@ -15,7 +15,7 @@ from typing import (
     get_origin,
 )
 
-MISSING = object()
+UNSET = object()
 
 _PYTHON_TO_JSONSCHEMA = {
     str: {"type": "string"},
@@ -28,7 +28,7 @@ _PYTHON_TO_JSONSCHEMA = {
 }
 
 
-def _type_to_schema(tp: Any, default: Any = MISSING) -> dict:
+def _type_to_schema(tp: Any, default: Any = UNSET) -> dict:
     origin = get_origin(tp)
     args = get_args(tp)
     if origin is Annotated:
@@ -62,13 +62,14 @@ def _type_to_schema(tp: Any, default: Any = MISSING) -> dict:
         result = dict(_PYTHON_TO_JSONSCHEMA[tp])
     else:
         result = {"type": "string"}
-    if default is not MISSING:
+    if default is not UNSET:
         result["default"] = default
     return result
 
 
 @dataclass_transform()
 class Resource:
+    UNSET = UNSET
     id: Any
     meta: dict | None = None
     _type: ClassVar[str] = ""
@@ -126,7 +127,7 @@ class Resource:
     def _field_map(cls) -> dict[str, dict]:
         result: dict[str, dict] = {}
         for f in dc_fields(cast(type, cls)):
-            default = f.default if f.default is not DC_MISSING else MISSING
+            default = f.default if f.default is not DC_MISSING else UNSET
             result[f.name] = {"type": f.type, "default": default}
         return result
 
@@ -366,14 +367,14 @@ class Resource:
 
         for field in fields:
             if field == "id":
-                instance.id = MISSING
+                instance.id = UNSET
             elif field in cls._attributes:
-                setattr(instance, field, MISSING)
+                setattr(instance, field, UNSET)
             elif field in cls._rel_names():
                 if field in dict(cls._plural_relationships):
                     setattr(instance, field, [])
                 else:
-                    setattr(instance, field, MISSING)
+                    setattr(instance, field, UNSET)
 
         for field in fields:
             if field == "id" and "id" in data:
@@ -397,29 +398,29 @@ class Resource:
 
     def serialize(self) -> dict:
         result: dict = {"type": self._type}
-        id_val = getattr(self, "id", MISSING)
-        if id_val is not MISSING:
+        id_val = getattr(self, "id", UNSET)
+        if id_val is not UNSET:
             result["id"] = str(id_val)
         for field in self._attributes:
-            value = getattr(self, field, MISSING)
-            if value is not MISSING:
+            value = getattr(self, field, UNSET)
+            if value is not UNSET:
                 result.setdefault("attributes", {})[field] = self._serialize_value(value)
         for field, type_name in self._singular_relationships:
-            value = getattr(self, field, MISSING)
-            if value is not MISSING:
+            value = getattr(self, field, UNSET)
+            if value is not UNSET:
                 rel = {}
                 if value is not None:
                     rel["data"] = {"type": type_name, "id": str(value)}
                 result.setdefault("relationships", {})[field] = rel
         for field, type_name in self._plural_relationships:
-            value = getattr(self, field, MISSING)
-            if value is not MISSING:
+            value = getattr(self, field, UNSET)
+            if value is not UNSET:
                 rel = {}
                 if value is not None:
                     assert isinstance(value, Sequence)
                     rel["data"] = [{"type": type_name, "id": str(item)} for item in value]
                 result.setdefault("relationships", {})[field] = rel
-        meta = getattr(self, "meta", MISSING)
-        if meta is not None and meta is not MISSING:
+        meta = getattr(self, "meta", UNSET)
+        if meta is not None and meta is not UNSET:
             result["meta"] = meta
         return result

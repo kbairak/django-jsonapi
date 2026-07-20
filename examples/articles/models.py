@@ -28,8 +28,8 @@ class Article(models.Model):
     title = models.CharField(max_length=200, unique=True)
     content = models.TextField()
     author = models.ForeignKey(User, on_delete=models.CASCADE, related_name="articles")
-    categories = models.ManyToManyField(Category, related_name="articles")
     created_at = models.DateTimeField(auto_now_add=True)
+    categories = models.ManyToManyField(Category, related_name="articles")
 
     def __str__(self):
         return self.title

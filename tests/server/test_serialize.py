@@ -1,7 +1,7 @@
 import uuid
 from typing import ClassVar
 
-from djsonapi.resource import MISSING, Resource
+from djsonapi.resource import UNSET, Resource
 
 
 class Article(Resource):
@@ -70,7 +70,7 @@ def test_missing_optional_attribute():
     id = uuid.uuid4()
     author = uuid.uuid4()
     article = Article(id=id, title="Hello", content="World", author=author)
-    setattr(article, "content", MISSING)
+    setattr(article, "content", UNSET)
     result = article.serialize()
     assert "content" not in result["attributes"]
     assert result["attributes"]["title"] == "Hello"
@@ -80,7 +80,7 @@ def test_missing_singular_relationship():
     id = uuid.uuid4()
     author = uuid.uuid4()
     article = Article(id=id, title="Hello", content="World", author=author)
-    setattr(article, "author", MISSING)
+    setattr(article, "author", UNSET)
     result = article.serialize()
     assert "author" not in result.get("relationships", {})
 
@@ -89,7 +89,7 @@ def test_no_id():
     id = uuid.uuid4()
     author = uuid.uuid4()
     article = Article(id=id, title="Hello", content="World", author=author)
-    setattr(article, "id", MISSING)
+    setattr(article, "id", UNSET)
     result = article.serialize()
     assert "id" not in result
 
