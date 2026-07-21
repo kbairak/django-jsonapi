@@ -20,9 +20,7 @@ async def noop() -> dict[str, str]:
 @dataclass
 class DjsonApiSdk:
     host: str = ""
-    headers: Callable[[], Awaitable[dict[str, str]]] = field(
-        default_factory=lambda: noop, init=False
-    )
+    headers: Callable[[], Awaitable[dict[str, str]]] = field(default_factory=lambda: noop)
     _registry: dict[str, type[Resource]] = field(default_factory=dict, init=False)
     _session: aiohttp.ClientSession | None = field(default=None, init=False)
 
@@ -130,8 +128,7 @@ class DjsonApiSdk:
                 )
                 for e in errors
             ]
-            if len(excs) == 1:
-                raise excs[0]
-            raise ExceptionGroup("JSON:API error(s)", excs)
-        cls = _exc_class_for(status)
-        raise cls(status, body.get("title", ""), body.get("detail", ""))
+        else:
+            cls = _exc_class_for(status)
+            excs = [cls(status, body.get("title", ""), body.get("detail", ""))]
+        raise ExceptionGroup("JSON:API error(s)", excs)

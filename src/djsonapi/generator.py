@@ -273,7 +273,11 @@ def _render_resource_class(
         if target is not None and target[0] in specs:
             target_name = specs[target[0]].class_name
             if target[1]:
-                ret = f"{target_name}Collection" if "get_many" in specs[target[0]].capabilities else f"Collection[{target_name}]"
+                ret = (
+                    f"{target_name}Collection"
+                    if "get_many" in specs[target[0]].capabilities
+                    else f"Collection[{target_name}]"
+                )
             else:
                 nullable = _is_optional(annotations.get(rel))
                 ret = f"{target_name} | None" if nullable else target_name
@@ -302,7 +306,7 @@ def _render_resource_class(
         get_includes = sorted(spec.get_include_types)
         if get_includes:
             renderer.imports.add("from typing import Literal")
-            includes_literal = ', '.join(f'"{inc}"' for inc in sorted(get_includes))
+            includes_literal = ", ".join(f'"{inc}"' for inc in sorted(get_includes))
             body += [
                 "",
                 "@overload",
@@ -323,7 +327,7 @@ def _render_resource_class(
         find_includes = sorted(spec.find_include_types)
         if find_includes:
             renderer.imports.add("from typing import Literal")
-            includes_literal = ', '.join(f'"{inc}"' for inc in sorted(find_includes))
+            includes_literal = ", ".join(f'"{inc}"' for inc in sorted(find_includes))
             body += [
                 "",
                 "@overload",
@@ -381,8 +385,7 @@ def _render_resource_class(
         body += [
             "",
             "async def save(",
-            f"    self, *fields: str, force_create: bool = False, "
-            f"**kwargs: Unpack[{edit_name}]",
+            f"    self, *fields: str, force_create: bool = False, **kwargs: Unpack[{edit_name}]",
             ") -> None:",
             "    await super().save(*fields, force_create=force_create, **kwargs)",
         ]
@@ -444,11 +447,13 @@ def _is_optional(tp: type | None) -> bool:
 def _strip_prefix(name: str) -> str:
     for prefix in ("filter__", "page__", "extra__"):
         if name.startswith(prefix):
-            return name[len(prefix):]
+            return name[len(prefix) :]
     return name
 
 
-def _sparse_literal(type_name: str, specs: dict[str, _TypeSpec], renderer: _Renderer) -> str | None:
+def _sparse_literal(
+    type_name: str, specs: dict[str, _TypeSpec], renderer: _Renderer
+) -> str | None:
     target = specs.get(type_name)
     if target is None:
         return None
@@ -499,7 +504,9 @@ def _render_resources(specs: dict[str, _TypeSpec]) -> str:
             (_strip_prefix(p.name), renderer.render(p.annotation)) for p in spec.get_query_params
         ]
         if "get_many" in spec.capabilities:
-            sections.append("\n".join(_render_typed_dict(f"{spec.class_name}Query", query_entries)))
+            sections.append(
+                "\n".join(_render_typed_dict(f"{spec.class_name}Query", query_entries))
+            )
         if "get_one" in spec.capabilities:
             sections.append(
                 "\n".join(_render_typed_dict(f"{spec.class_name}GetQuery", get_entries))
@@ -516,7 +523,9 @@ def _render_resources(specs: dict[str, _TypeSpec]) -> str:
                     rendered = f"{target_name} | {renderer.render(annotations.get(f, Any))} | None"
                 elif f in plural_rels and plural_rels[f] in specs:
                     target_name = specs[plural_rels[f]].class_name
-                    rendered = f"list[{target_name}] | {renderer.render(annotations.get(f, Any))} | None"
+                    rendered = (
+                        f"list[{target_name}] | {renderer.render(annotations.get(f, Any))} | None"
+                    )
                 else:
                     rendered = renderer.render_optional(annotations.get(f, Any))
                 edit_entries.append((f, rendered))
@@ -544,8 +553,7 @@ def _render_resources(specs: dict[str, _TypeSpec]) -> str:
             fields_lines = []
             if spec.allowed_sparse:
                 fields_params = sorted(
-                    (name, _sparse_literal(name, specs, renderer))
-                    for name in spec.allowed_sparse
+                    (name, _sparse_literal(name, specs, renderer)) for name in spec.allowed_sparse
                 )
                 fields_params = [(name, lit) for name, lit in fields_params if lit is not None]
                 if fields_params:
@@ -562,9 +570,7 @@ def _render_resources(specs: dict[str, _TypeSpec]) -> str:
                 filter_lines.append(
                     f"    def filter(self, **kwargs: Unpack[{spec.class_name}Query]) -> Self:"
                 )
-                filter_lines.append(
-                    "        return super().filter(**kwargs)"
-                )
+                filter_lines.append("        return super().filter(**kwargs)")
             body = (
                 f'class {spec.class_name}Collection(Collection["{spec.class_name}"]):\n'
                 + "\n".join(filter_lines)
@@ -655,9 +661,7 @@ class _TSRenderer:
         if origin is Literal:
             return " | ".join(repr(a) for a in args)
         if origin in (Union, types.UnionType):
-            return " | ".join(
-                "null" if a is type(None) else self.render(a) for a in args
-            )
+            return " | ".join("null" if a is type(None) else self.render(a) for a in args)
         if origin is list or origin is collections.abc.Sequence:
             return f"{self.render(args[0]) if args else 'unknown'}[]"
         if origin is dict:
@@ -714,15 +718,15 @@ def _render_ts_collection_class(
             if origin is Literal:
                 lit = " | ".join(repr(a) for a in args)
                 sort_lines.append(f"  sort(...fields: ({lit})[]): this {{")
-                sort_lines.append(f"    return super.sort(...fields);")
-                sort_lines.append(f"  }}")
+                sort_lines.append("    return super.sort(...fields);")
+                sort_lines.append("  }")
             elif origin is list and args:
                 item_origin = get_origin(args[0])
                 if item_origin is Literal:
                     lit = " | ".join(repr(a) for a in get_args(args[0]))
                     sort_lines.append(f"  sort(...fields: ({lit})[]): this {{")
-                    sort_lines.append(f"    return super.sort(...fields);")
-                    sort_lines.append(f"  }}")
+                    sort_lines.append("    return super.sort(...fields);")
+                    sort_lines.append("  }")
 
     fields_lines: list[str] = []
     if spec.allowed_sparse:
@@ -765,7 +769,7 @@ def _render_ts_collection_class(
     if not filter_params and not sort_lines and not fields_lines:
         lines = [
             f"export class {name}Collection extends Collection<{name}> {{",
-            f"}}",
+            "}",
         ]
 
     return lines
@@ -796,14 +800,14 @@ def _render_ts_resource_class(
         attr_types[attr] = annotations.get(attr, Any)
     body.append("  static _attributeTypes: Record<string, string> = {")
     for key, tp in attr_types.items():
-        body.append(f'    {key!r}: {renderer.render(tp)!r},')
+        body.append(f"    {key!r}: {renderer.render(tp)!r},")
     body.append("  };")
 
     rel_entries = list(cls._singular_relationships) + list(cls._plural_relationships)
     if rel_entries:
         body.append("  static _relationshipTypes: Record<string, [string, boolean]> = {")
         for field, target in sorted(spec.rel_targets.items()):
-            body.append(f'    {field!r}: [{target[0]!r}, {str(target[1]).lower()}],')
+            body.append(f"    {field!r}: [{target[0]!r}, {str(target[1]).lower()}],")
         body.append("  };")
 
     caps = sorted(spec.capabilities)
@@ -823,7 +827,7 @@ def _render_ts_resource_class(
                 nullable = _is_optional(annotations.get(rel))
                 ret = f"{target_name} | null" if nullable else target_name
         elif target is not None:
-            ret = f'Collection<any> | null' if target[1] else "Resource | null"
+            ret = "Collection<any> | null" if target[1] else "Resource | null"
         else:
             ret = "unknown" if not target[1] else "Collection<unknown>"
         body.append(f"  get {rel}(): {ret} {{ return this.get({rel!r}) as {ret}; }}")
@@ -885,7 +889,7 @@ def _render_ts_resource_class(
         body += [
             "",
             f"  async save(props?: {edit_name}): Promise<void> {{",
-            f"    await super.save(props as Record<string, unknown>);",
+            "    await super.save(props as Record<string, unknown>);",
             "  }",
         ]
 
@@ -902,8 +906,8 @@ def _render_ts_resource_class(
                 f"  async edit(relationship: {rel!r}, resource: {target_type}): Promise<void>;",
             ]
         body += [
-            f"  async edit(relationship: string, resource: unknown): Promise<void> {{",
-            f"    await super.edit(relationship, resource);",
+            "  async edit(relationship: string, resource: unknown): Promise<void> {",
+            "    await super.edit(relationship, resource);",
             "  }",
         ]
 
@@ -944,8 +948,7 @@ def _render_ts_resources(specs: dict[str, _TypeSpec]) -> str:
             if p.name.startswith("filter__")
         ]
         get_entries = [
-            (_strip_prefix(p.name), renderer.render(p.annotation))
-            for p in spec.get_query_params
+            (_strip_prefix(p.name), renderer.render(p.annotation)) for p in spec.get_query_params
         ]
         if "get_many" in spec.capabilities:
             query_interfaces.append(
@@ -967,7 +970,9 @@ def _render_ts_resources(specs: dict[str, _TypeSpec]) -> str:
                     rendered = f"{target_name} | {renderer.render(annotations.get(f, Any))} | null"
                 elif f in plural_rels and plural_rels[f] in specs:
                     target_name = specs[plural_rels[f]].class_name
-                    rendered = f"{target_name}[] | {renderer.render(annotations.get(f, Any))} | null"
+                    rendered = (
+                        f"{target_name}[] | {renderer.render(annotations.get(f, Any))} | null"
+                    )
                 else:
                     rendered = renderer.render_optional(annotations.get(f, Any))
                 edit_entries.append((f, rendered))
@@ -1011,9 +1016,7 @@ def _render_ts_resources(specs: dict[str, _TypeSpec]) -> str:
     return (
         'import { Collection } from "./_runtime/collection.js";\n'
         'import { Resource } from "./_runtime/resource.js";\n'
-        "\n"
-        + "\n\n".join(sections)
-        + "\n"
+        "\n" + "\n\n".join(sections) + "\n"
     )
 
 
@@ -1030,28 +1033,22 @@ def _render_ts_sdk(specs: dict[str, _TypeSpec]) -> str:
     lines.append("export class SDK extends DjsonApiSdk {")
     lines.append("  static _resourceClasses: Record<string, typeof Resource> = {")
     for spec in specs.values():
-        lines.append(f'    {spec.type_name!r}: {spec.class_name},')
+        lines.append(f"    {spec.type_name!r}: {spec.class_name},")
     lines.append("  };")
     lines.append("")
     for spec in specs.values():
         lines.append(f"  declare readonly {spec.type_name}: typeof {spec.class_name};")
     lines.append("}")
     lines.append("")
-    lines.append("export function createSdk(config: SdkConfig): SDK {")
-    lines.append("  const sdk = new SDK(config);")
+    lines.append("function _register(sdk: SDK): void {")
     lines.append("  for (const [typeName, cls] of Object.entries(SDK._resourceClasses)) {")
     lines.append("    ;(sdk as any)._registry.set(typeName, cls);")
     lines.append("    cls._sdk = sdk;")
     lines.append("  }")
-    lines.append("  return new Proxy(sdk, {")
-    lines.append("    get(target, prop, receiver) {")
-    lines.append("      if (prop in target || typeof prop === 'symbol') {")
-    lines.append("        return Reflect.get(target, prop, receiver);")
-    lines.append("      }")
-    lines.append("      return target._getResourceClass(prop as string);")
-    lines.append("    },")
-    lines.append("  }) as SDK;")
     lines.append("}")
+    lines.append("")
+    lines.append("export const sdk: SDK = DjsonApiSdk._withProxy(new SDK()) as SDK;")
+    lines.append("_register(sdk);")
     return "\n".join(lines) + "\n"
 
 
@@ -1074,11 +1071,13 @@ def _render_ts_init(specs: dict[str, _TypeSpec]) -> str:
         if "edit" in spec.capabilities:
             type_exports.append(f"{n}Edit")
         lines.append(f'export type {{ {", ".join(type_exports)} }} from "./resources.js";')
-    lines.append(f'export {{ SDK, createSdk }} from "./sdk.js";')
+    lines.append('export { SDK, sdk } from "./sdk.js";')
     return "\n".join(lines) + "\n"
 
 
-def generate_typescript(api: DjsonApi, output_dir: str | Path, package_name: str | None = None) -> Path:
+def generate_typescript(
+    api: DjsonApi, output_dir: str | Path, package_name: str | None = None
+) -> Path:
     """Generate a typed TypeScript SDK for ``api`` into ``output_dir``."""
     output_dir = Path(output_dir).expanduser().resolve()
 

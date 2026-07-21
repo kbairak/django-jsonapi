@@ -3,12 +3,6 @@ import { DjsonApiSdk, Resource } from "../src/index.js"
 
 const HOST = "http://testserver"
 
-function createSdk() {
-  return DjsonApiSdk.create({
-    host: HOST,
-    headers: async () => ({}),
-  })
-}
 
 const articlePayload = {
   type: "articles",
@@ -68,7 +62,7 @@ describe("SdkSetup", () => {
 
 describe("SdkGetAttr", () => {
   it("returns resource type via proxy", () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const articles = (sdk as any).articles
     expect(articles).toBeInstanceOf(Function)
     expect(articles._type).toBe("articles")
@@ -77,14 +71,14 @@ describe("SdkGetAttr", () => {
   })
 
   it("caches resource types", () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const a1 = (sdk as any).articles
     const a2 = (sdk as any).articles
     expect(a1).toBe(a2)
   })
 
   it("plural access works", () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const articles = (sdk as any).articles
     expect(articles._type).toBe("articles")
   })
@@ -92,7 +86,7 @@ describe("SdkGetAttr", () => {
 
 describe("SdkRequest", () => {
   it("sends JSON:API headers", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, articleResponse)
 
     await sdk._request(`${HOST}/articles/1`)
@@ -119,7 +113,7 @@ describe("SdkRequest", () => {
 
 describe("SdkCreate", () => {
   it("creates resource from payload", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const resource = sdk._createResource(articlePayload)
     expect(resource._type).toBe("articles")
     expect(resource.id).toBe("1")
@@ -129,14 +123,14 @@ describe("SdkCreate", () => {
 
 describe("SdkParseResponse", () => {
   it("parses single resource", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const parsed = sdk._parseResponse(articleResponse as any)
     expect(parsed instanceof Resource).toBe(true)
     expect((parsed as Resource).id).toBe("1")
   })
 
   it("parses list response", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const a2 = { ...articlePayload, id: "2" }
     const response = { data: [articlePayload, a2] }
     const parsed = sdk._parseResponse(response as any)
@@ -145,7 +139,7 @@ describe("SdkParseResponse", () => {
   })
 
   it("resolves included references", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const articleWithRel = {
       ...articlePayload,
       relationships: {
@@ -164,7 +158,7 @@ describe("SdkParseResponse", () => {
   })
 
   it("resolves included collection refs", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const categoryPayload = {
       type: "categories",
       id: "10",
@@ -185,14 +179,14 @@ describe("SdkParseResponse", () => {
   })
 
   it("sets meta on single resource", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const response = { data: articlePayload, meta: { foo: "bar" } }
     const parsed = sdk._parseResponse(response as any) as Resource
     expect(parsed.meta).toEqual({ foo: "bar" })
   })
 
   it("sets meta on list", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const a2 = { ...articlePayload, id: "2" }
     const response = { data: [articlePayload, a2], meta: { total: 10 } }
     const parsed = sdk._parseResponse(response as any) as Resource[]

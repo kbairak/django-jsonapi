@@ -51,6 +51,4 @@ class Command(BaseCommand):
         elif language == "typescript":
             output_dir = generate_typescript(api, Path(output).expanduser())
 
-        self.stdout.write(
-            self.style.SUCCESS(f"Generated {language} SDK in {output_dir}")
-        )
+        self.stdout.write(self.style.SUCCESS(f"Generated {language} SDK in {output_dir}"))

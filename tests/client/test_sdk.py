@@ -13,8 +13,10 @@ class TestSdkSetup:
 
     def test_setup_headers(self):
         sdk = DjsonApiSdk()
+
         async def my_headers():
             return {"Authorization": "Bearer x"}
+
         sdk.setup(headers=my_headers)
         assert sdk.headers is my_headers
 

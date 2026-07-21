@@ -12,3 +12,6 @@ wheels/
 # Generated SDKs (examples)
 examples/clienttest_py/articles_sdk/
 examples/clienttest_ts/articles_sdk/
+examples/backoffice/node_modules/
+examples/backoffice/src/articles_sdk/
+examples/server/db.sqlite3

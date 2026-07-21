@@ -39,6 +39,7 @@ class SparseArticle(Resource):
 def _make_request():
     import django
     from django.conf import settings
+
     if not settings.configured:
         settings.configure(
             DEBUG=True,
@@ -49,6 +50,7 @@ def _make_request():
         )
         django.setup()
     from django.test import RequestFactory
+
     return RequestFactory().get("/articles")
 
 
@@ -60,9 +62,7 @@ def test_basic_serialize():
         "type": "articles",
         "id": str(id),
         "attributes": {"title": "Hello", "content": "World"},
-        "relationships": {
-            "author": {"data": {"type": "author", "id": str(author)}}
-        },
+        "relationships": {"author": {"data": {"type": "author", "id": str(author)}}},
     }
 
 
@@ -99,9 +99,7 @@ def test_plural_relationships():
     author = uuid.uuid4()
     tag1 = uuid.uuid4()
     tag2 = uuid.uuid4()
-    article = ArticleWithPlural(
-        id=id, title="Hello", author=author, tags=[tag1, tag2]
-    )
+    article = ArticleWithPlural(id=id, title="Hello", author=author, tags=[tag1, tag2])
     result = article.serialize()
     assert result["relationships"]["tags"] == {
         "data": [
@@ -114,9 +112,7 @@ def test_plural_relationships():
 def test_empty_plural_relationships():
     id = uuid.uuid4()
     author = uuid.uuid4()
-    article = ArticleWithPlural(
-        id=id, title="Hello", author=author, tags=[]
-    )
+    article = ArticleWithPlural(id=id, title="Hello", author=author, tags=[])
     result = article.serialize()
     assert result["relationships"]["tags"] == {"data": []}
 
@@ -153,9 +149,7 @@ def test_serialize_dict_relationships():
         "type": "articles",
         "id": str(id),
         "attributes": {"title": "Hello"},
-        "relationships": {
-            "author": {"data": {"type": "users", "id": str(author)}}
-        },
+        "relationships": {"author": {"data": {"type": "users", "id": str(author)}}},
     }
 
 
@@ -213,13 +207,9 @@ def test_serialize_tuple_plural_relationships():
     author = uuid.uuid4()
     tag1 = uuid.uuid4()
     cat1 = uuid.uuid4()
-    obj = TuplePluralRels(
-        id=id, title="Hello", author=author, tags=[tag1], categories=[cat1]
-    )
+    obj = TuplePluralRels(id=id, title="Hello", author=author, tags=[tag1], categories=[cat1])
     result = obj.serialize()
-    assert result["relationships"]["tags"] == {
-        "data": [{"type": "tag_objects", "id": str(tag1)}]
-    }
+    assert result["relationships"]["tags"] == {"data": [{"type": "tag_objects", "id": str(tag1)}]}
     assert result["relationships"]["categories"] == {
         "data": [{"type": "categories", "id": str(cat1)}]
     }

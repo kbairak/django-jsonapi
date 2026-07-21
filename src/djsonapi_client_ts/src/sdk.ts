@@ -4,8 +4,8 @@ import { Resource } from "./resource.js"
 import type { Document, ResourceObject } from "./types.js"
 
 export interface SdkConfig {
-  host: string
-  headers: () => Promise<Record<string, string>>
+  host?: string
+  headers?: () => Promise<Record<string, string>>
 }
 
 export type ResourceConstructor<T extends Resource = Resource> = typeof Resource & {
@@ -22,17 +22,28 @@ export interface RequestOptions {
 }
 
 export class DjsonApiSdk {
-  host: string
-  headers: () => Promise<Record<string, string>>
+  host = ""
+  headers: () => Promise<Record<string, string>> = async () => ({})
+  debug = false
   private _registry = new Map<string, ResourceConstructor>()
 
-  constructor(config: SdkConfig) {
-    this.host = config.host
-    this.headers = config.headers
+  constructor(config?: SdkConfig) {
+    if (config) {
+      this.host = config.host ?? ""
+      this.headers = config.headers ?? (async () => ({}))
+    }
   }
 
-  static create(config: SdkConfig): DjsonApiSdk {
-    const sdk = new DjsonApiSdk(config)
+  _log(...args: unknown[]): void {
+    if (this.debug) console.log("[djsonapi]", ...args)
+  }
+
+  setup(config: SdkConfig): void {
+    if (config.host !== undefined) this.host = config.host
+    if (config.headers !== undefined) this.headers = config.headers
+  }
+
+  static _withProxy(sdk: DjsonApiSdk): DjsonApiSdk {
     return new Proxy(sdk, {
       get(target, prop, receiver) {
         if (prop in target || typeof prop === "symbol") {
@@ -41,6 +52,10 @@ export class DjsonApiSdk {
         return target._getResourceClass(prop as string)
       },
     })
+  }
+
+  static create(config: SdkConfig): DjsonApiSdk {
+    return DjsonApiSdk._withProxy(new DjsonApiSdk(config))
   }
 
   _getResourceClass(name: string): ResourceConstructor {
@@ -61,7 +76,10 @@ export class DjsonApiSdk {
     if (opts.params) {
       url.search = new URLSearchParams(opts.params).toString()
     }
-    const res = await fetch(url.toString(), {
+    const fullUrl = url.toString()
+    this._log(`${opts.method ?? "GET"} ${fullUrl}`)
+    if (opts.body) this._log("body:", opts.body)
+    const res = await fetch(fullUrl, {
       method: opts.method ?? "GET",
       headers: {
         ...(await this.headers()),
@@ -73,6 +91,7 @@ export class DjsonApiSdk {
     })
     const body: Document | null =
       res.status === 204 ? null : await res.json()
+    this._log("response", res.status, body)
     if (!res.ok) {
       this._raiseForStatus(res.status, (body ?? {}) as Record<string, unknown>)
     }
@@ -158,3 +177,5 @@ export class DjsonApiSdk {
     return result
   }
 }
+
+export const sdk: DjsonApiSdk = DjsonApiSdk._withProxy(new DjsonApiSdk())

@@ -63,22 +63,15 @@ export class Collection<T extends Resource = Resource> {
     await this.fetch()
   }
 
+  /**
+   * Access item at index. For array methods (map, filter, slice, etc.),
+   * spread into array first: `[...articles].map(...)`
+   */
   at(index: number): T | undefined {
     if (this._data == null) {
       throw new Error("Data not fetched yet. Use 'await collection' first.")
     }
     return this._data[index]
-  }
-
-  first(): T | undefined {
-    return this.at(0)
-  }
-
-  items(): T[] {
-    if (this._data == null) {
-      throw new Error("Data not fetched yet. Use 'await collection' first.")
-    }
-    return [...this._data]
   }
 
   get length(): number {
@@ -107,11 +100,7 @@ export class Collection<T extends Resource = Resource> {
   filter(kwargs: Record<string, unknown>): this {
     const prefixed: Record<string, unknown> = {}
     for (const [k, v] of Object.entries(kwargs)) {
-      if (k.startsWith("filter__")) {
-        prefixed[k] = v
-      } else {
-        prefixed[`filter__${k}`] = v
-      }
+      prefixed[`filter__${k}`] = v
     }
     return new (this.constructor as new (
       ...args: unknown[]
@@ -247,7 +236,7 @@ export class Collection<T extends Resource = Resource> {
 
   async *all(): AsyncGenerator<Resource> {
     for await (const page of (this.allPages() as any)) {
-      for (const item of page.items()) {
+      for (const item of page) {
         yield item as Resource
       }
     }

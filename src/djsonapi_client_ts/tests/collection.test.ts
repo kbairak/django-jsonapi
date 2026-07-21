@@ -3,12 +3,6 @@ import { DjsonApiSdk, Collection, Resource } from "../src/index.js"
 
 const HOST = "http://testserver"
 
-function createSdk() {
-  return DjsonApiSdk.create({
-    host: HOST,
-    headers: async () => ({}),
-  })
-}
 
 const articlePayload = {
   type: "articles",
@@ -45,7 +39,7 @@ function mockFetch(status = 200, body: unknown = {}) {
 
 describe("CollectionAwait", () => {
   it("populates data on await", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const col = new Collection(sdk, `${HOST}/articles`, {})
     expect(col._data).toBeNull()
 
@@ -58,7 +52,7 @@ describe("CollectionAwait", () => {
   })
 
   it("sets links on fetch", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, articleListResponse)
 
     const col = new Collection(sdk, `${HOST}/articles`, {})
@@ -68,7 +62,7 @@ describe("CollectionAwait", () => {
   })
 
   it("sets meta on fetch", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, articleListResponse)
 
     const col = new Collection(sdk, `${HOST}/articles`, {})
@@ -77,7 +71,7 @@ describe("CollectionAwait", () => {
   })
 
   it("is idempotent", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, articleListResponse)
 
     const col = new Collection(sdk, `${HOST}/articles`, {})
@@ -90,7 +84,7 @@ describe("CollectionAwait", () => {
 
 describe("CollectionChaining", () => {
   it("filter", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const col = new Collection(sdk, `${HOST}/articles`, {}).filter({
       title: "hello",
     })
@@ -98,7 +92,7 @@ describe("CollectionChaining", () => {
   })
 
   it("filter chains", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const col = new Collection(sdk, `${HOST}/articles`, {})
       .filter({ title: "hello" })
       .filter({ author: "42" })
@@ -109,7 +103,7 @@ describe("CollectionChaining", () => {
   })
 
   it("include", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const col = new Collection(sdk, `${HOST}/articles`, {}).include(
       "author",
       "categories",
@@ -118,7 +112,7 @@ describe("CollectionChaining", () => {
   })
 
   it("sort", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const col = new Collection(sdk, `${HOST}/articles`, {}).sort(
       "title",
       "-created_at",
@@ -127,7 +121,7 @@ describe("CollectionChaining", () => {
   })
 
   it("fields", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const col = new Collection(sdk, `${HOST}/articles`, {}).fields({
       articles: ["title", "content"],
     })
@@ -135,13 +129,13 @@ describe("CollectionChaining", () => {
   })
 
   it("page with number", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const col = new Collection(sdk, `${HOST}/articles`, {}).page(2)
     expect(col._params.page).toBe("2")
   })
 
   it("page with params", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const col = new Collection(sdk, `${HOST}/articles`, {}).page({
       size: "20",
       number: "3",
@@ -151,7 +145,7 @@ describe("CollectionChaining", () => {
   })
 
   it("extra", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const col = new Collection(sdk, `${HOST}/articles`, {}).extra({
       custom: "value",
     })
@@ -159,15 +153,15 @@ describe("CollectionChaining", () => {
   })
 
   it("returns new collection on filter", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const col = new Collection(sdk, `${HOST}/articles`, {})
     const filtered = col.filter({ title: "hello" })
-    expect(filtered).not.toBe(col)
+    expect(col === filtered).toBe(false)
     expect(col._params).toEqual({})
   })
 
   it("extracts url params on init", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const col = new Collection(sdk, `${HOST}/articles?foo=bar`, {})
     expect(col._url).toBe(`${HOST}/articles`)
     expect(col._params).toEqual({ foo: "bar" })
@@ -176,7 +170,7 @@ describe("CollectionChaining", () => {
 
 describe("CollectionAccess", () => {
   it("at returns item by index", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, articleListResponse)
 
     const col = new Collection(sdk, `${HOST}/articles`, {})
@@ -186,33 +180,13 @@ describe("CollectionAccess", () => {
   })
 
   it("at unfetched throws", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const col = new Collection(sdk, `${HOST}/articles`, {})
     expect(() => col.at(0)).toThrow("not fetched")
   })
 
-  it("first returns first item", async () => {
-    const sdk = createSdk()
-    globalThis.fetch = mockFetch(200, articleListResponse)
-
-    const col = new Collection(sdk, `${HOST}/articles`, {})
-    await col.fetch()
-    expect(col.first()!.get("title")).toBe("Hello World")
-  })
-
-  it("items returns copy", async () => {
-    const sdk = createSdk()
-    globalThis.fetch = mockFetch(200, articleListResponse)
-
-    const col = new Collection(sdk, `${HOST}/articles`, {})
-    await col.fetch()
-    const items = col.items()
-    expect(items).toHaveLength(2)
-    expect(items).not.toBe(col._data)
-  })
-
   it("length", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, articleListResponse)
 
     const col = new Collection(sdk, `${HOST}/articles`, {})
@@ -221,7 +195,7 @@ describe("CollectionAccess", () => {
   })
 
   it("length unfetched throws", () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const col = new Collection(sdk, `${HOST}/articles`, {})
     expect(() => col.length).toThrow("not fetched")
   })
@@ -229,7 +203,7 @@ describe("CollectionAccess", () => {
 
 describe("CollectionIteration", () => {
   it("async iterator yields items", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, articleListResponse)
 
     const col = new Collection(sdk, `${HOST}/articles`, {})
@@ -243,7 +217,7 @@ describe("CollectionIteration", () => {
 
 describe("CollectionPagination", () => {
   it("hasNext", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, articleListResponse)
 
     const col = new Collection(sdk, `${HOST}/articles`, {})
@@ -252,7 +226,7 @@ describe("CollectionPagination", () => {
   })
 
   it("hasNext false when missing", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, { data: [] })
 
     const col = new Collection(sdk, `${HOST}/articles`, {})
@@ -261,7 +235,7 @@ describe("CollectionPagination", () => {
   })
 
   it("getNext", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, articleListResponse)
 
     const col = new Collection(sdk, `${HOST}/articles`, {})
@@ -272,7 +246,7 @@ describe("CollectionPagination", () => {
   })
 
   it("hasPrevious", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, articleListResponse)
 
     const col = new Collection(sdk, `${HOST}/articles`, {})
@@ -281,7 +255,7 @@ describe("CollectionPagination", () => {
   })
 
   it("hasFirst and hasLast", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, articleListResponse)
 
     const col = new Collection(sdk, `${HOST}/articles`, {})
@@ -291,7 +265,7 @@ describe("CollectionPagination", () => {
   })
 
   it("allPages follows pagination", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const p1 = {
       data: [{ type: "articles", id: "1" }],
       links: { next: `${HOST}/articles?page=2` },
@@ -325,7 +299,7 @@ describe("CollectionPagination", () => {
   })
 
   it("all yields all items across pages", async () => {
-    const sdk = createSdk()
+    const sdk = new DjsonApiSdk({ host: HOST, headers: async () => ({}) })
     const p1 = {
       data: [
         {

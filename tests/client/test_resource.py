@@ -215,7 +215,9 @@ class TestResourceRefetch:
         async with article_type._sdk:
             with mock_get(
                 article_type._sdk,
-                payload={"data": {"type": "articles", "id": "1", "attributes": {"title": "Refreshed"}}},
+                payload={
+                    "data": {"type": "articles", "id": "1", "attributes": {"title": "Refreshed"}}
+                },
             ):
                 await article.refetch()
                 assert article.title == "Refreshed"

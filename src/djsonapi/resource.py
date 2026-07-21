@@ -74,8 +74,8 @@ class Resource:
     meta: dict | None = None
     _type: ClassVar[str] = ""
     _attributes: ClassVar[list[str]] = []
-    _singular_relationships: ClassVar[list] = []
-    _plural_relationships: ClassVar[list] = []
+    _singular_relationships: ClassVar[list | dict] = []
+    _plural_relationships: ClassVar[list | dict] = []
     _create_fields: ClassVar[list[str]] = []
     _required_create_fields: ClassVar[list[str]] = []
     _edit_fields: ClassVar[list[str]] = []
@@ -93,9 +93,7 @@ class Resource:
             elif isinstance(item, tuple) and len(item) == 2:
                 result.append(item)
             else:
-                raise TypeError(
-                    f"Expected str or 2-tuple, got {type(item).__name__}"
-                )
+                raise TypeError(f"Expected str or 2-tuple, got {type(item).__name__}")
         return result
 
     def __hash__(self) -> int:
@@ -104,17 +102,15 @@ class Resource:
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Resource):
             return NotImplemented
-        return self._type == other._type and getattr(self, "id", None) == getattr(other, "id", None)
+        return self._type == other._type and getattr(self, "id", None) == getattr(
+            other, "id", None
+        )
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         dataclass(cls)
-        cls._singular_relationships = cls._normalize_relationships(
-            cls._singular_relationships
-        )
-        cls._plural_relationships = cls._normalize_relationships(
-            cls._plural_relationships
-        )
+        cls._singular_relationships = cls._normalize_relationships(cls._singular_relationships)
+        cls._plural_relationships = cls._normalize_relationships(cls._plural_relationships)
 
     @classmethod
     def _annotations(cls) -> dict[str, type]:
@@ -382,17 +378,27 @@ class Resource:
             elif field in cls._attributes:
                 attr_val = data.get("attributes", {}).get(field)
                 if attr_val is not None:
-                    setattr(instance, field, cls._convert_value(attr_val, annotations.get(field, str)))
+                    setattr(
+                        instance, field, cls._convert_value(attr_val, annotations.get(field, str))
+                    )
             elif field in cls._rel_names():
                 rel_data = data.get("relationships", {}).get(field, {}).get("data")
                 if rel_data is not None:
                     if isinstance(rel_data, dict):
-                        setattr(instance, field, cls._convert_value(rel_data["id"], annotations.get(field, str)))
+                        setattr(
+                            instance,
+                            field,
+                            cls._convert_value(rel_data["id"], annotations.get(field, str)),
+                        )
                     elif isinstance(rel_data, list):
                         tp = annotations.get(field, list)
                         args = get_args(tp)
                         item_tp = args[0] if args else str
-                        setattr(instance, field, [cls._convert_value(item["id"], item_tp) for item in rel_data])
+                        setattr(
+                            instance,
+                            field,
+                            [cls._convert_value(item["id"], item_tp) for item in rel_data],
+                        )
 
         return instance
 

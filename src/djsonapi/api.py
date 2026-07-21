@@ -727,7 +727,7 @@ class ReturnsDataMixin(Endpoint):
                 else:
                     kwargs[param.name] = value
             elif param.name.startswith("page__"):
-                page_key = f"page[{param.name[len('page__'):]}]"
+                page_key = f"page[{param.name[len('page__') :]}]"
                 value, error = _pop_typed_param(rp, param, query_name=page_key)
                 if error is not None:
                     errors.append(error)
@@ -1326,7 +1326,10 @@ class DjsonApi:
             if isinstance(data, list):
                 return [{"type": r._type, "id": str(r.id)} for r in data]
             return {"type": data._type, "id": str(data.id)}
-        _auto_handler.__name__ = f"get_{related_ep.type_name}_{related_ep.relationship_name}_relationship"
+
+        _auto_handler.__name__ = (
+            f"get_{related_ep.type_name}_{related_ep.relationship_name}_relationship"
+        )
 
         ep = GetRelationshipEndpoint(
             related_ep.type_name,

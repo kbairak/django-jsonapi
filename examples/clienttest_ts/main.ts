@@ -1,11 +1,6 @@
-import { createSdk, User } from "./articles_sdk/index.js";
+import { sdk, User } from "./articles_sdk/index.js";
 
-const host = "http://localhost:8000/api/";
-
-const sdk = createSdk({
-  host,
-  headers: async () => ({}),
-});
+sdk.setup({ host: "http://localhost:8000/api/" });
 
 async function main() {
   const admin = await sdk.users.find({ username: "admin" });

@@ -28,6 +28,7 @@ class Article(Resource):
             content=article.content,
             author=article.author_id,
             created_at=article.created_at,
+            categories=list(article.categories.values_list("id", flat=True)),
         )
 
 

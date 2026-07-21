@@ -73,8 +73,7 @@ class TestEndpoint:
     def test_smart_parameters_skips_request(self):
         from djsonapi.api import Endpoint
 
-        def handler(request, x: int, y: str):
-            ...
+        def handler(request, x: int, y: str): ...
 
         ep = Endpoint("articles", handler)
         assert [p.name for p in ep.smart_parameters] == ["x", "y"]
@@ -82,8 +81,7 @@ class TestEndpoint:
     def test_expected_extra_only_extra_prefix(self):
         from djsonapi.api import Endpoint
 
-        def handler(request, extra__page: int = 1, extra__limit: int = 10, sort: str = ""):
-            ...
+        def handler(request, extra__page: int = 1, extra__limit: int = 10, sort: str = ""): ...
 
         ep = Endpoint("articles", handler)
         assert [p.name for p in ep.expected_extra] == ["extra__page", "extra__limit"]
@@ -91,8 +89,7 @@ class TestEndpoint:
     def test_return_resource_type_bare_resource(self):
         from djsonapi.api import Endpoint
 
-        def handler(request) -> Article:
-            ...
+        def handler(request) -> Article: ...
 
         ep = Endpoint("articles", handler)
         assert ep.return_resource_type is Article
@@ -100,8 +97,7 @@ class TestEndpoint:
     def test_return_resource_type_response_wrapped(self):
         from djsonapi.api import Endpoint
 
-        def handler(request) -> Response[Article]:
-            ...
+        def handler(request) -> Response[Article]: ...
 
         ep = Endpoint("articles", handler)
         assert ep.return_resource_type is Article
@@ -109,8 +105,7 @@ class TestEndpoint:
     def test_return_resource_type_response_list(self):
         from djsonapi.api import Endpoint
 
-        def handler(request) -> Response[list[Article]]:
-            ...
+        def handler(request) -> Response[list[Article]]: ...
 
         ep = Endpoint("articles", handler)
         assert ep.return_resource_type is Article
@@ -127,8 +122,7 @@ class TestEndpoint:
     def test_view_missing_required_param_raises(self):
         from djsonapi.api import Endpoint
 
-        def handler(request, required: str):
-            ...
+        def handler(request, required: str): ...
 
         ep = Endpoint("articles", handler)
         with pytest.raises(DjsonApiExceptionMulti) as exc:
@@ -258,8 +252,7 @@ class TestGetManyEndpoint:
     def test_sort_param_as_string(self):
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, sort: str = ""):
-            ...
+        def handler(request, sort: str = ""): ...
 
         ep = GetManyEndpoint("articles", handler)
         req = RequestFactory().get("/?sort=title")
@@ -269,8 +262,7 @@ class TestGetManyEndpoint:
     def test_sort_param_with_commas_as_list(self):
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, sort: list[str] | None = None):
-            ...
+        def handler(request, sort: list[str] | None = None): ...
 
         ep = GetManyEndpoint("articles", handler)
         req = RequestFactory().get("/?sort=title,author")
@@ -282,8 +274,7 @@ class TestGetManyEndpoint:
 
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, sort: Literal["title", "-title"] = "title"):
-            ...
+        def handler(request, sort: Literal["title", "-title"] = "title"): ...
 
         ep = GetManyEndpoint("articles", handler)
         req = RequestFactory().get("/?sort=title")
@@ -296,8 +287,7 @@ class TestGetManyEndpoint:
 
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, sort: Literal["title", "-title"] = "title"):
-            ...
+        def handler(request, sort: Literal["title", "-title"] = "title"): ...
 
         ep = GetManyEndpoint("articles", handler)
         req = RequestFactory().get("/?sort=-name")
@@ -310,8 +300,7 @@ class TestGetManyEndpoint:
 
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, sort: Literal["title", "-title"] = "title"):
-            ...
+        def handler(request, sort: Literal["title", "-title"] = "title"): ...
 
         ep = GetManyEndpoint("articles", handler)
         req = RequestFactory().get("/?sort=title,-title")
@@ -324,8 +313,7 @@ class TestGetManyEndpoint:
 
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, sort: list[Literal["title", "-title"]] | None = None):
-            ...
+        def handler(request, sort: list[Literal["title", "-title"]] | None = None): ...
 
         ep = GetManyEndpoint("articles", handler)
         # list annotation without direct Literal → no Literal validation
@@ -337,8 +325,7 @@ class TestGetManyEndpoint:
     def test_page_param_converted_to_int(self):
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, page: int = 1):
-            ...
+        def handler(request, page: int = 1): ...
 
         ep = GetManyEndpoint("articles", handler)
         req = RequestFactory().get("/?page=2")
@@ -348,8 +335,7 @@ class TestGetManyEndpoint:
     def test_page_invalid_conversion_error(self):
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, page: int = 1):
-            ...
+        def handler(request, page: int = 1): ...
 
         ep = GetManyEndpoint("articles", handler)
         req = RequestFactory().get("/?page=abc")
@@ -359,8 +345,7 @@ class TestGetManyEndpoint:
     def test_filter_param_passed_through(self):
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, filter__title: str = ""):
-            ...
+        def handler(request, filter__title: str = ""): ...
 
         ep = GetManyEndpoint("articles", handler)
         req = RequestFactory().get("/?title=hello")
@@ -370,8 +355,7 @@ class TestGetManyEndpoint:
     def test_filter_param_bracket_form(self):
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, filter__title__contains: str = ""):
-            ...
+        def handler(request, filter__title__contains: str = ""): ...
 
         ep = GetManyEndpoint("articles", handler)
         req = RequestFactory().get("/?filter[title][contains]=hello")
@@ -381,8 +365,7 @@ class TestGetManyEndpoint:
     def test_filter_param_bracket_preferred_over_bare(self):
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, filter__title: str = ""):
-            ...
+        def handler(request, filter__title: str = ""): ...
 
         ep = GetManyEndpoint("articles", handler)
         req = RequestFactory().get("/?filter[title]=bracket&title=bare")
@@ -392,8 +375,7 @@ class TestGetManyEndpoint:
     def test_page_bracket_param(self):
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, page__number: int = 1):
-            ...
+        def handler(request, page__number: int = 1): ...
 
         ep = GetManyEndpoint("articles", handler)
         req = RequestFactory().get("/?page[number]=3")
@@ -404,8 +386,7 @@ class TestGetManyEndpoint:
     def test_page_bracket_param_invalid(self):
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, page__number: int = 1):
-            ...
+        def handler(request, page__number: int = 1): ...
 
         ep = GetManyEndpoint("articles", handler)
         req = RequestFactory().get("/?page[number]=abc")
@@ -415,8 +396,7 @@ class TestGetManyEndpoint:
     def test_page_bracket_param_default(self):
         from djsonapi.api import GetManyEndpoint
 
-        def handler(request, page__number: int = 1):
-            ...
+        def handler(request, page__number: int = 1): ...
 
         ep = GetManyEndpoint("articles", handler)
         req = RequestFactory().get("/")
@@ -431,6 +411,7 @@ class TestCreateOneEndpoint:
 
         def handler(r, p: Article) -> Article:
             return Article(id=1)
+
         ep = CreateOneEndpoint("articles", handler)
         assert ep.url == "articles"
 
@@ -441,7 +422,9 @@ class TestCreateOneEndpoint:
             return payload
 
         ep = CreateOneEndpoint("articles", handler)
-        body = json.dumps({"data": {"type": "articles", "attributes": {"title": "T", "content": "C"}}})
+        body = json.dumps(
+            {"data": {"type": "articles", "attributes": {"title": "T", "content": "C"}}}
+        )
         req = RequestFactory().post("/", body, content_type="application/vnd.api+json")
         result = asyncio.run(ep.view(req))
         assert isinstance(result, dict)
@@ -511,6 +494,7 @@ class TestDeleteOneEndpoint:
         asyncio.run(ep.view(req, aid="1"))
         # postprocess for 204 returns HttpResponse directly
         from django.http import HttpResponse
+
         assert isinstance(ep._postprocess(Response(data=None), req), HttpResponse)
         assert ep._postprocess(Response(data=None), req).status_code == 204
 
@@ -537,7 +521,9 @@ class TestEditRelationshipEndpoint:
     def test_url_includes_relationship_path(self):
         from djsonapi.api import EditRelationshipEndpoint
 
-        ep = EditRelationshipEndpoint("articles", lambda r, aid, author_id: None, relationship_name="author")
+        ep = EditRelationshipEndpoint(
+            "articles", lambda r, aid, author_id: None, relationship_name="author"
+        )
         assert "relationship/author" in ep.url
 
     def test_parses_single_relationship_id(self):
@@ -556,7 +542,9 @@ class TestEditRelationshipEndpoint:
     def test_returns_204(self):
         from djsonapi.api import EditRelationshipEndpoint
 
-        ep = EditRelationshipEndpoint("articles", lambda r, aid, author_id: None, relationship_name="author")
+        ep = EditRelationshipEndpoint(
+            "articles", lambda r, aid, author_id: None, relationship_name="author"
+        )
         assert ep.SUCCESS_STATUS == 204
 
 
@@ -568,7 +556,9 @@ class TestAddToRelationshipEndpoint:
             return category_ids
 
         ep = AddToRelationshipEndpoint("articles", handler, relationship_name="categories")
-        body = json.dumps({"data": [{"type": "categories", "id": "1"}, {"type": "categories", "id": "2"}]})
+        body = json.dumps(
+            {"data": [{"type": "categories", "id": "1"}, {"type": "categories", "id": "2"}]}
+        )
         req = RequestFactory().post("/", body, content_type="application/vnd.api+json")
         kwargs, errors = ep._get_kwargs(req, {"article_id": "1"}, req.GET.dict())
         assert not errors
@@ -579,26 +569,20 @@ class TestGetRelationshipEndpoint:
     def test_url_includes_relationship_path(self):
         from djsonapi.api import GetRelationshipEndpoint
 
-        ep = GetRelationshipEndpoint(
-            "articles", lambda r, aid: None, relationship_name="author"
-        )
+        ep = GetRelationshipEndpoint("articles", lambda r, aid: None, relationship_name="author")
         assert "relationship/author" in ep.url
 
     def test_url_name(self):
         from djsonapi.api import GetRelationshipEndpoint
 
-        ep = GetRelationshipEndpoint(
-            "articles", lambda r, aid: None, relationship_name="author"
-        )
+        ep = GetRelationshipEndpoint("articles", lambda r, aid: None, relationship_name="author")
         assert ep.url_name == "articles__author__relationship"
 
     def test_postprocess_singular(self):
         from djsonapi.api import GetRelationshipEndpoint
         from djsonapi.response import Response
 
-        ep = GetRelationshipEndpoint(
-            "articles", lambda r, aid: None, relationship_name="author"
-        )
+        ep = GetRelationshipEndpoint("articles", lambda r, aid: None, relationship_name="author")
         req = RequestFactory().get("/articles/1/relationship/author")
         response = Response(data={"type": "users", "id": "5"})
         result = ep._postprocess(response, req)
@@ -615,7 +599,9 @@ class TestGetRelationshipEndpoint:
             "articles", lambda r, aid: None, relationship_name="categories"
         )
         req = RequestFactory().get("/articles/1/relationship/categories")
-        response = Response(data=[{"type": "categories", "id": "2"}, {"type": "categories", "id": "3"}])
+        response = Response(
+            data=[{"type": "categories", "id": "2"}, {"type": "categories", "id": "3"}]
+        )
         result = ep._postprocess(response, req)
         assert isinstance(result["data"], list)
         assert len(result["data"]) == 2
@@ -624,9 +610,7 @@ class TestGetRelationshipEndpoint:
         from djsonapi.api import GetRelationshipEndpoint
         from djsonapi.response import Response
 
-        ep = GetRelationshipEndpoint(
-            "articles", lambda r, aid: None, relationship_name="author"
-        )
+        ep = GetRelationshipEndpoint("articles", lambda r, aid: None, relationship_name="author")
         req = RequestFactory().get("/articles/1/relationship/author")
         response = Response(data=None)
         result = ep._postprocess(response, req)
@@ -636,9 +620,7 @@ class TestGetRelationshipEndpoint:
         from djsonapi.api import GetRelationshipEndpoint
         from djsonapi.response import Response
 
-        ep = GetRelationshipEndpoint(
-            "articles", lambda r, aid: None, relationship_name="author"
-        )
+        ep = GetRelationshipEndpoint("articles", lambda r, aid: None, relationship_name="author")
         req = RequestFactory().get("/articles/1/relationship/author?foo=bar")
         response = Response(data={"type": "users", "id": "5"})
         result = ep._postprocess(response, req)
@@ -740,9 +722,7 @@ class TestDjsonApiRegistry:
 
         api.urls  # triggers _auto_derive_relationship_endpoints
 
-        rel_endpoints = [
-            ep for ep in api.registry if isinstance(ep, GetRelationshipEndpoint)
-        ]
+        rel_endpoints = [ep for ep in api.registry if isinstance(ep, GetRelationshipEndpoint)]
         assert len(rel_endpoints) == 1
         assert rel_endpoints[0].type_name == "articles"
         assert rel_endpoints[0].relationship_name == "author"
@@ -760,9 +740,7 @@ class TestDjsonApiRegistry:
 
         api.urls  # triggers _auto_derive_relationship_endpoints
 
-        rel_endpoints = [
-            ep for ep in api.registry if isinstance(ep, GetRelationshipEndpoint)
-        ]
+        rel_endpoints = [ep for ep in api.registry if isinstance(ep, GetRelationshipEndpoint)]
         assert len(rel_endpoints) == 1
 
     def test_edit_relationship(self):
@@ -922,8 +900,7 @@ class TestReturnsDataMixin:
     def test_invalid_include_types_raises_valueerror(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request, article_id: int, include__nonexist: bool = False):
-            ...
+        def handler(request, article_id: int, include__nonexist: bool = False): ...
 
         with pytest.raises(ValueError, match="Invalid include"):
             ReturnsDataMixin("articles", handler, sparse=False)
@@ -931,8 +908,7 @@ class TestReturnsDataMixin:
     def test_invalid_sparse_types_raises_valueerror(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request, article_id: int, fields__unknown: list[str] | None = None):
-            ...
+        def handler(request, article_id: int, fields__unknown: list[str] | None = None): ...
 
         with pytest.raises(ValueError, match="Invalid sparse"):
             ReturnsDataMixin("articles", handler, sparse=True)
@@ -940,8 +916,7 @@ class TestReturnsDataMixin:
     def test_expected_includes_from_params(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request, article_id: int, include__author: bool = False) -> Article:
-            ...
+        def handler(request, article_id: int, include__author: bool = False) -> Article: ...
 
         ep = ReturnsDataMixin("articles", handler, sparse=True, include_types=[UserResource])
         assert ep.expected_includes == {"author"}
@@ -950,8 +925,9 @@ class TestReturnsDataMixin:
     def test_expected_sparse(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request, article_id: int, fields__articles: list[str] | None = None) -> Article:
-            ...
+        def handler(
+            request, article_id: int, fields__articles: list[str] | None = None
+        ) -> Article: ...
 
         ep = ReturnsDataMixin("articles", handler, sparse=True, include_types=[UserResource])
         assert ep.expected_sparse == {"articles"}
@@ -960,8 +936,7 @@ class TestReturnsDataMixin:
     def test_allowed_sparse_from_resource(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request) -> Article:
-            ...
+        def handler(request) -> Article: ...
 
         ep = ReturnsDataMixin("articles", handler, sparse=True)
         allowed = ep.allowed_sparse
@@ -971,8 +946,7 @@ class TestReturnsDataMixin:
     def test_allowed_includes_from_resource_relationships(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request) -> Article:
-            ...
+        def handler(request) -> Article: ...
 
         ep = ReturnsDataMixin("articles", handler, sparse=True)
         assert "author" in ep.allowed_includes
@@ -981,8 +955,7 @@ class TestReturnsDataMixin:
     def test_postprocess_returns_serialized_result(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request) -> Article:
-            ...
+        def handler(request) -> Article: ...
 
         ep = ReturnsDataMixin("articles", handler, sparse=False)
         req = RequestFactory().get("/articles/1")
@@ -993,10 +966,12 @@ class TestReturnsDataMixin:
     def test_nested_expected_includes_dotted_paths(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request, article_id: int,
-                     include__author: bool = False,
-                     include__author__articles: bool = False) -> Article:
-            ...
+        def handler(
+            request,
+            article_id: int,
+            include__author: bool = False,
+            include__author__articles: bool = False,
+        ) -> Article: ...
 
         ep = ReturnsDataMixin("articles", handler, sparse=False)
         assert "author" in ep.expected_includes
@@ -1005,9 +980,9 @@ class TestReturnsDataMixin:
     def test_nested_expected_includes_auto_adds_intermediates(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request, article_id: int,
-                     include__author__articles__comments: bool = False) -> Article:
-            ...
+        def handler(
+            request, article_id: int, include__author__articles__comments: bool = False
+        ) -> Article: ...
 
         ep = ReturnsDataMixin("articles", handler, sparse=False)
         assert "author" in ep.expected_includes
@@ -1017,19 +992,21 @@ class TestReturnsDataMixin:
     def test_nested_include_passes_post_init_validation(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request, article_id: int,
-                     include__author__articles: bool = False) -> Article:
-            ...
+        def handler(
+            request, article_id: int, include__author__articles: bool = False
+        ) -> Article: ...
 
         ReturnsDataMixin("articles", handler, sparse=False)  # no ValueError
 
     def test_nested_include_get_kwargs_expands_intermediates(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request, article_id: int,
-                     include__author: bool = False,
-                     include__author__articles: bool = False) -> Article:
-            ...
+        def handler(
+            request,
+            article_id: int,
+            include__author: bool = False,
+            include__author__articles: bool = False,
+        ) -> Article: ...
 
         ep = ReturnsDataMixin("articles", handler, sparse=False)
         req = RequestFactory().get("/?include=author.articles")
@@ -1041,10 +1018,12 @@ class TestReturnsDataMixin:
     def test_nested_include_flat_include_only(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request, article_id: int,
-                     include__author: bool = False,
-                     include__author__articles: bool = False) -> Article:
-            ...
+        def handler(
+            request,
+            article_id: int,
+            include__author: bool = False,
+            include__author__articles: bool = False,
+        ) -> Article: ...
 
         ep = ReturnsDataMixin("articles", handler, sparse=False)
         req = RequestFactory().get("/?include=author")
@@ -1056,9 +1035,7 @@ class TestReturnsDataMixin:
     def test_nested_include_invalid_dotted_rejected(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request, article_id: int,
-                     include__author: bool = False) -> Article:
-            ...
+        def handler(request, article_id: int, include__author: bool = False) -> Article: ...
 
         ep = ReturnsDataMixin("articles", handler, sparse=False)
         req = RequestFactory().get("/?include=author.articles")
@@ -1068,11 +1045,13 @@ class TestReturnsDataMixin:
     def test_nested_include_combined_flat_and_dotted(self):
         from djsonapi.api import ReturnsDataMixin
 
-        def handler(request, article_id: int,
-                     include__author: bool = False,
-                     include__author__articles: bool = False,
-                     include__categories: bool = False) -> Article:
-            ...
+        def handler(
+            request,
+            article_id: int,
+            include__author: bool = False,
+            include__author__articles: bool = False,
+            include__categories: bool = False,
+        ) -> Article: ...
 
         ep = ReturnsDataMixin("articles", handler, sparse=False)
         req = RequestFactory().get("/?include=author.articles,categories")
@@ -1149,7 +1128,9 @@ class TestBuildOpenapiSpec:
         api = DjsonApi()
 
         @api.get_many("articles")
-        def list_articles(request, sort: str = "", page: int = 1, filter__title: str = "") -> list[Article]:
+        def list_articles(
+            request, sort: str = "", page: int = 1, filter__title: str = ""
+        ) -> list[Article]:
             return [Article(id=1)]
 
         spec = api._build_openapi_spec()
@@ -1375,7 +1356,8 @@ class TestBuildOpenapiSpec:
 
         @api.get_one("articles")
         def get_article(
-            request, article_id: int,
+            request,
+            article_id: int,
             include__author: bool = False,
             include__author__articles: bool = False,
         ) -> Article:

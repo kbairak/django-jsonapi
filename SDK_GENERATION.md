@@ -67,8 +67,8 @@ behavior via ClassVars:
   updates `self._related[relationship]`, and returns a `Resource` (singular)
   or a fetched `Collection` (plural, using the target's collection class).
 - **Query translation** — `list(**query)`, `get(id, **query)` and
-  `Collection.filter(**kwargs)` accept dunder-style kwargs and translate
-  them to what the server expects: `filter__x__y` → `filter[x][y]`,
+`Collection.filter(**kwargs)` accept dunder-style kwargs and translate
+them to what the server expects: `x__y` → `filter[x][y]`,
   `page__n` → `page[n]`, `include__a__b` → `include=a.b` (CSV),
   `fields__t` → `fields[t]`, `extra__x` → `x`; unknown keys pass through.
 - **Typed collections** — `Collection` is `Generic[T]` and chainable

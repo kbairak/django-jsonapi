@@ -126,9 +126,7 @@ class TestTypeConversion:
         article = sdk.articles(title="T", author=42, categories=[10, 20])
         payload = article._payload()
         assert "author" not in payload.get("attributes", {})
-        assert payload["relationships"]["author"] == {
-            "data": {"type": "users", "id": "42"}
-        }
+        assert payload["relationships"]["author"] == {"data": {"type": "users", "id": "42"}}
         assert payload["relationships"]["categories"] == {
             "data": [
                 {"type": "categories", "id": "10"},
@@ -226,7 +224,7 @@ class TestQueryTranslation:
         async with sdk:
             with patch_session(sdk, "get", payload=body) as mock_get:
                 col = sdk.articles.list()
-                col = col.filter(filter__title__contains="foo")
+                col = col.filter(title__contains="foo")
                 col = col.page(2)
                 col = col.sort("-created_at")
                 col = col.include("author")

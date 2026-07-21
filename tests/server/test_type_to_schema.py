@@ -118,9 +118,7 @@ def test_default_param():
 
 
 def test_default_with_annotated():
-    assert _type_to_schema(
-        Annotated[str, {"examples": ["a"]}], default="x"
-    ) == {
+    assert _type_to_schema(Annotated[str, {"examples": ["a"]}], default="x") == {
         "type": "string",
         "examples": ["a"],
         "default": "x",

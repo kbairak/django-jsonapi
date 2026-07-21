@@ -1,0 +1,55 @@
+site_name: djsonapi
+site_description: JSON:API framework for Django
+repo_url: https://github.com/kbairak/django-jsonapi
+theme:
+  name: material
+  features:
+    - content.code.annotate
+    - content.code.copy
+    - content.tabs.link
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Light mode
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets
+  - pymdownx.inlinehilite
+  - admonition
+  - attr_list
+  - md_in_html
+nav:
+  - Home: index.md
+  - Server:
+    - Resources: server/resources.md
+    - Endpoints: server/endpoints.md
+    - URL Linking: server/url-linking.md
+    - Validation & Schemas: server/validation.md
+    - Errors: server/errors.md
+    - OpenAPI & Redoc: server/openapi.md
+  - SDK:
+    - Overview: sdk/index.md
+    - Generation: sdk/generation.md
+    - Setup & Usage: sdk/usage.md
+    - Resources & CRUD: sdk/resource.md
+    - Collections: sdk/collection.md
+    - Typed Features: sdk/typed.md
+    - Errors: sdk/errors.md

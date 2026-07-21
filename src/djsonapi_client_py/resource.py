@@ -122,8 +122,7 @@ class Resource:
             data = kwargs.pop("_data")
             self.id = self._convert("id", data.get("id"))
             self.attributes = {
-                key: self._convert(key, value)
-                for key, value in data.get("attributes", {}).items()
+                key: self._convert(key, value) for key, value in data.get("attributes", {}).items()
             }
             self.relationships = data.get("relationships", {})
             self.links = data.get("links", {})
@@ -222,16 +221,14 @@ class Resource:
                         data = None
                 self._related[name] = Collection(self._sdk, url, _data=data)
 
-    def _related_singular(
-        self, ri: dict | None, links: dict
-    ) -> Resource | None:
+    def _related_singular(self, ri: dict | None, links: dict) -> Resource | None:
         if ri is None:
             return None
         if self._sdk is not None:
             r = self._sdk.create(ri)
         else:
             r = Resource(_data=ri)
-        r.links.setdefault("self", links.get("related"))
+        r.links.setdefault("self", links.get("related") or "")
         return r
 
     def _to_related_value(self, value: Any) -> Any:
@@ -277,9 +274,7 @@ class Resource:
                         return Collection(
                             self._sdk, "", _data=[self._sdk.create(item) for item in data]
                         )
-                    return Collection(
-                        self._sdk, "", _data=[Resource(_data=item) for item in data]
-                    )
+                    return Collection(self._sdk, "", _data=[Resource(_data=item) for item in data])
                 if self._sdk is not None:
                     return self._sdk.create(data)
                 return Resource(_data=data)
@@ -545,15 +540,21 @@ class Resource:
 
     async def add(self, relationship: str, *resources):
         self._check_relationship_capability(relationship, "add")
-        await self._mutate_relationship("POST", relationship, self._mutation_ris(relationship, resources))
+        await self._mutate_relationship(
+            "POST", relationship, self._mutation_ris(relationship, resources)
+        )
 
     async def remove(self, relationship: str, *resources):
         self._check_relationship_capability(relationship, "remove")
-        await self._mutate_relationship("DELETE", relationship, self._mutation_ris(relationship, resources))
+        await self._mutate_relationship(
+            "DELETE", relationship, self._mutation_ris(relationship, resources)
+        )
 
     async def reset(self, relationship: str, *resources):
         self._check_relationship_capability(relationship, "reset")
-        await self._mutate_relationship("PATCH", relationship, self._mutation_ris(relationship, resources))
+        await self._mutate_relationship(
+            "PATCH", relationship, self._mutation_ris(relationship, resources)
+        )
 
     async def edit(self, relationship: str, resource: Any) -> None:
         self._check_relationship_capability(relationship, "edit")
@@ -576,9 +577,7 @@ class Resource:
             return
         rel = self.relationships[name]
         if Resource._is_singular(rel):
-            self._related[name] = self._related_singular(
-                rel.get("data"), rel.get("links", {})
-            )
+            self._related[name] = self._related_singular(rel.get("data"), rel.get("links", {}))
         else:
             url = rel.get("links", {}).get("related", "")
             self._related[name] = Collection(self._sdk, url, _data=None)

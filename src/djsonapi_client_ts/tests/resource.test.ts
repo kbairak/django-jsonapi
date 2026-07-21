@@ -3,13 +3,6 @@ import { DjsonApiSdk, Resource, Collection } from "../src/index.js"
 
 const HOST = "http://testserver"
 
-function createSdk() {
-  return DjsonApiSdk.create({
-    host: HOST,
-    headers: async () => ({}),
-  })
-}
-
 const articlePayload = {
   type: "articles",
   id: "1",
@@ -66,7 +59,7 @@ function mockFetch(status = 200, body: unknown = {}) {
 
 describe("ResourceGet", () => {
   it("fetches by id", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, articleResponse)
 
     const article = await (sdk as any).articles.get("1")
@@ -75,7 +68,7 @@ describe("ResourceGet", () => {
   })
 
   it("passes includes as params", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(200, articleResponse)
 
     await (sdk as any).articles.get("1", "author")
@@ -86,7 +79,7 @@ describe("ResourceGet", () => {
 
 describe("ResourceCreate", () => {
   it("creates and returns resource", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const payload = {
       data: {
         type: "articles",
@@ -102,7 +95,7 @@ describe("ResourceCreate", () => {
   })
 
   it("sends POST on create", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     globalThis.fetch = mockFetch(201, {
       data: { type: "articles", id: "1", attributes: { title: "New" } },
     })
@@ -115,7 +108,7 @@ describe("ResourceCreate", () => {
 
 describe("ResourceSave", () => {
   it("patches existing resource", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const Article = (sdk as any).articles
     const article = new Article({ id: "1", title: "Old" })
     globalThis.fetch = mockFetch(200, {
@@ -127,7 +120,7 @@ describe("ResourceSave", () => {
   })
 
   it("posts new resource", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const Article = (sdk as any).articles
     const article = new Article({ title: "New" })
     globalThis.fetch = mockFetch(201, {
@@ -139,7 +132,7 @@ describe("ResourceSave", () => {
   })
 
   it("sends POST for new resources", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const Article = (sdk as any).articles
     const article = new Article({ title: "New" })
     globalThis.fetch = mockFetch(201, {
@@ -152,7 +145,7 @@ describe("ResourceSave", () => {
   })
 
   it("handles 204 no content", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const Article = (sdk as any).articles
     const article = new Article({ id: "1", title: "Old" })
     globalThis.fetch = mockFetch(204, null)
@@ -164,7 +157,7 @@ describe("ResourceSave", () => {
 
 describe("ResourceDelete", () => {
   it("deletes and clears id", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const Article = (sdk as any).articles
     const article = new Article({ id: "1" })
     globalThis.fetch = mockFetch(204, null)
@@ -176,7 +169,7 @@ describe("ResourceDelete", () => {
 
 describe("ResourceRefetch", () => {
   it("refetches from self link", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const Article = (sdk as any).articles
     const article = new Article({ _data: articlePayload })
     article._fetched = false
@@ -196,13 +189,13 @@ describe("ResourceRefetch", () => {
 
 describe("ResourceAttributeAccess", () => {
   it("get reads attributes", () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const r = new Resource({ _data: { type: "x", id: "1", attributes: { foo: "bar" } } })
     expect(r.get("foo")).toBe("bar")
   })
 
   it("get reads related", () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const r = sdk._createResource({
       type: "x",
       id: "1",
@@ -246,7 +239,7 @@ describe("ResourceAttributeAccess", () => {
 
 describe("ResourcePostInit", () => {
   it("resolves singular relationship", () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const Article = (sdk as any).articles
     const r = new Article({
       _data: {
@@ -261,7 +254,7 @@ describe("ResourcePostInit", () => {
   })
 
   it("resolves null singular relationship", () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const Article = (sdk as any).articles
     const r = new Article({
       _data: {
@@ -274,7 +267,7 @@ describe("ResourcePostInit", () => {
   })
 
   it("resolves plural relationship to collection", () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const Article = (sdk as any).articles
     const r = new Article({
       _data: {
@@ -301,7 +294,7 @@ describe("ResourcePostInit", () => {
   })
 
   it("constructs with relationship kwargs", () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const User = (sdk as any).users
     const author = new User({ id: "42" })
     const r = new Resource({ id: "1", author })
@@ -312,7 +305,7 @@ describe("ResourcePostInit", () => {
 
 describe("ResourceRelationshipMutation", () => {
   it("add", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const Article = (sdk as any).articles
     const Category = (sdk as any).categories
     const article = new Article({ id: "1", categories: [] })
@@ -324,7 +317,7 @@ describe("ResourceRelationshipMutation", () => {
   })
 
   it("add multiple", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const Article = (sdk as any).articles
     const Category = (sdk as any).categories
     const article = new Article({ id: "1", categories: [] })
@@ -335,7 +328,7 @@ describe("ResourceRelationshipMutation", () => {
   })
 
   it("remove", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const Article = (sdk as any).articles
     const Category = (sdk as any).categories
     const article = new Article({ id: "1", categories: [] })
@@ -346,7 +339,7 @@ describe("ResourceRelationshipMutation", () => {
   })
 
   it("reset", async () => {
-    const sdk = createSdk()
+    const sdk = DjsonApiSdk.create({ host: HOST, headers: async () => ({}) })
     const Article = (sdk as any).articles
     const Category = (sdk as any).categories
     const article = new Article({ id: "1", categories: [] })

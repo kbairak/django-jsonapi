@@ -72,11 +72,7 @@ class TestCollectionChaining:
         assert col._params["filter[title]"] == "hello"
 
     def test_filter_chains(self, sdk):
-        col = (
-            Collection(sdk, f"{HOST}/articles")
-            .filter(title="hello")
-            .filter(author="42")
-        )
+        col = Collection(sdk, f"{HOST}/articles").filter(title="hello").filter(author="42")
         assert col._params == {"filter[title]": "hello", "filter[author]": "42"}
 
     def test_include(self, sdk):
@@ -287,5 +283,6 @@ class TestCollectionPagination:
 class TestCollectionSequence:
     def test_is_sequence(self, sdk):
         from collections.abc import Sequence
+
         col = Collection(sdk, f"{HOST}/articles")
         assert isinstance(col, Sequence)

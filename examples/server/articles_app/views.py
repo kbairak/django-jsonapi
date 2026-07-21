@@ -1,8 +1,10 @@
-from typing import Literal
+from math import ceil
+from typing import Any, Literal
 
 from django.db import IntegrityError
 from django.http import HttpRequest
 
+from djsonapi import Response
 from djsonapi.api import DjsonApi
 from djsonapi.exceptions import Conflict, NotFound
 
@@ -26,7 +28,9 @@ def get_articles(
     filter__category: int | None = None,
     filter__author: int | None = None,
     sort: Literal["title", "-title", "created_at", "-created_at"] = "-created_at",
-) -> list[ArticleResource]:
+    page__size: int = 10,
+    page__number: int = 1,
+) -> Response[list[ArticleResource]]:
     qs = ArticleModel.objects.all()
 
     if sort == "title":
@@ -45,7 +49,34 @@ def get_articles(
     if filter__author is not None:
         qs = qs.filter(author_id=filter__author)
 
-    return [ArticleResource.from_model(article) for article in qs]
+    total = qs.count()
+    offset = (page__number - 1) * page__size
+    qs = qs[offset : offset + page__size]
+
+    total_pages = max(1, ceil(total / page__size))
+    links: dict[str, Any] = {
+        "first": {"page[number]": "1", "page[size]": str(page__size)},
+    }
+    if page__number > 1:
+        links["prev"] = {
+            "page[number]": str(page__number - 1),
+            "page[size]": str(page__size),
+        }
+    if page__number < total_pages:
+        links["next"] = {
+            "page[number]": str(page__number + 1),
+            "page[size]": str(page__size),
+        }
+        links["last"] = {
+            "page[number]": str(total_pages),
+            "page[size]": str(page__size),
+        }
+
+    return Response(
+        data=[ArticleResource.from_model(article) for article in qs],
+        links=links,
+        meta={"total": total},
+    )
 
 
 @api.get_one("articles", errors=(NotFound,))

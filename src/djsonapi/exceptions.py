@@ -37,9 +37,7 @@ class DjsonApiExceptionSingle(DjsonApiException):
             detail = self.DETAIL
         if title is None:
             title = (
-                _class_name_to_title(self.__class__.__name__)
-                if self.TITLE is None
-                else self.TITLE
+                _class_name_to_title(self.__class__.__name__) if self.TITLE is None else self.TITLE
             )
         if source is None:
             source = self.SOURCE

@@ -23,7 +23,7 @@ def translate_query(query: dict[str, Any]) -> dict[str, str]:
 
     Mirrors the server's expectations (see ``djsonapi.api``):
 
-    - ``filter__title__contains`` -> ``filter[title][contains]``
+    - ``title__contains`` -> ``filter[title][contains]``
     - ``page`` -> ``page``, ``page__number`` -> ``page[number]``
     - ``sort`` -> ``sort``
     - ``include__author`` -> ``include=author`` (CSV-merged, dots for nesting)
@@ -44,14 +44,14 @@ def translate_query(query: dict[str, Any]) -> dict[str, str]:
         elif key == "page":
             params["page"] = str(value)
         elif key.startswith("page__"):
-            params[f"page[{key[len('page__'):]}]"] = str(value)
+            params[f"page[{key[len('page__') :]}]"] = str(value)
         elif key == "sort":
             params["sort"] = _csv(value)
         elif key.startswith("include__"):
             if value:
                 includes.append(key[len("include__") :].replace("__", "."))
         elif key.startswith("fields__"):
-            params[f"fields[{key[len('fields__'):]}]"] = _csv(value)
+            params[f"fields[{key[len('fields__') :]}]"] = _csv(value)
         elif key.startswith("extra__"):
             params[key[len("extra__") :]] = _csv(value)
         else:
@@ -113,13 +113,10 @@ class Collection[T: "Resource"](Sequence):
         return len(self._data)
 
     def filter(self, **kwargs: Any) -> Self:
-        prefixed = {}
-        for k, v in kwargs.items():
-            if k.startswith("filter__"):
-                prefixed[k] = v
-            else:
-                prefixed[f"filter__{k}"] = v
-        return self.__class__(self._sdk, self._url, {**self._params, **translate_query(prefixed)})
+        return self.__class__(
+            self._sdk, self._url,
+            {**self._params, **translate_query({f"filter__{k}": v for k, v in kwargs.items()})},
+        )
 
     def include(self, *names: str) -> Self:
         return self.__class__(
