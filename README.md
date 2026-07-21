@@ -6,7 +6,7 @@ Django with:
 
 - **Server** — Declarative resources, decorator-based endpoints, JSON Schema
   validation, OpenAPI + Redoc docs, auto-generated relationship URLs
-- **Client** — Generic async client (`djsonapi_client.DjsonApiSdk`) and a
+- **Client** — Generic async client (`djsonapi_client_py.DjsonApiSdk`) and a
   **typed SDK generator** that produces a sealed, IDE-friendly Python package
   mirroring your exact API
 
@@ -511,7 +511,7 @@ parameter:
 path to your `DjsonApi` instance.)
 
 The result is a **self-contained Python package** — only dependency is
-`aiohttp`. It copies `djsonapi_client` as its `_runtime/` sub-package.
+`aiohttp`. It copies `djsonapi_client_py` as its `_runtime/` sub-package.
 
 ## Usage
 

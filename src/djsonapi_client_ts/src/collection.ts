@@ -88,6 +88,15 @@ export class Collection<T extends Resource = Resource> {
     return this._data.length
   }
 
+  *[Symbol.iterator](): Generator<T> {
+    if (this._data == null) {
+      throw new Error("Data not fetched yet. Use 'await collection' first.")
+    }
+    for (const item of this._data) {
+      yield item
+    }
+  }
+
   async *[Symbol.asyncIterator](): AsyncGenerator<T> {
     await this.fetch()
     for (const item of this._data!) {

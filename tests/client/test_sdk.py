@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from djsonapi_client import DjsonApiSdk, Resource
+from djsonapi_client_py import DjsonApiSdk, Resource
 
 HOST = "http://testserver"
 

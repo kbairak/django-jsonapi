@@ -1,6 +1,6 @@
 """Generate a typed client SDK package from a ``DjsonApi`` instance.
 
-The generated package copies ``djsonapi_client`` verbatim as its ``_runtime``
+The generated package copies ``djsonapi_client_py`` verbatim as its ``_runtime``
 sub-package and adds a thin typed layer on top: per-resource classes with
 attribute annotations, capability flags and typed ``list``/``get``/``create``/
 ``save``/``fetch`` wrappers, plus an ``SDK`` subclass with the known resource
@@ -1112,9 +1112,9 @@ def generate(api: DjsonApi, output_dir: str | Path, package_name: str | None = N
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    import djsonapi_client
+    import djsonapi_client_py
 
-    runtime_src = Path(djsonapi_client.__file__).parent
+    runtime_src = Path(djsonapi_client_py.__file__).parent
     runtime_dst = output_dir / "_runtime"
     if runtime_dst.exists():
         shutil.rmtree(runtime_dst)

@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from djsonapi_client import DjsonApiSdk
+from djsonapi_client_py import DjsonApiSdk
 
 HOST = "http://testserver"
 

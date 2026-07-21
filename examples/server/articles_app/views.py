@@ -24,6 +24,7 @@ def get_articles(
     request: HttpRequest,
     filter__title__contains: str = "",
     filter__category: int | None = None,
+    filter__author: int | None = None,
     sort: Literal["title", "-title", "created_at", "-created_at"] = "-created_at",
 ) -> list[ArticleResource]:
     qs = ArticleModel.objects.all()
@@ -41,6 +42,8 @@ def get_articles(
         qs = qs.filter(title__contains=filter__title__contains)
     if filter__category is not None:
         qs = qs.filter(categories__id=filter__category)
+    if filter__author is not None:
+        qs = qs.filter(author_id=filter__author)
 
     return [ArticleResource.from_model(article) for article in qs]
 
@@ -182,6 +185,11 @@ def get_user(request: HttpRequest, user_id: int) -> UserResource:
     except UserModel.DoesNotExist:
         raise NotFound(f"User with id '{user_id}' not found")
     return UserResource(id=user.pk, username=user.username)
+
+
+@api.get_related("users", "articles", errors=(NotFound,))
+def get_user_articles(request: HttpRequest, user_id: int) -> list[ArticleResource]:
+    return get_articles(request, filter__author=user_id)
 
 
 # Categories

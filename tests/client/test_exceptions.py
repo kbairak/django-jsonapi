@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from djsonapi_client import (
+from djsonapi_client_py import (
     BadRequest,
     Collection,
     Conflict,

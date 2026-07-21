@@ -1326,13 +1326,17 @@ class DjsonApi:
             if isinstance(data, list):
                 return [{"type": r._type, "id": str(r.id)} for r in data]
             return {"type": data._type, "id": str(data.id)}
+        _auto_handler.__name__ = f"get_{related_ep.type_name}_{related_ep.relationship_name}_relationship"
 
-        return GetRelationshipEndpoint(
+        ep = GetRelationshipEndpoint(
             related_ep.type_name,
             _auto_handler,
             errors=related_ep.errors,
             relationship_name=related_ep.relationship_name,
         )
+        ep.pk_type = related_ep.pk_type
+        ep.pk_name = related_ep.pk_name
+        return ep
 
     @property
     def urls(self) -> list[URLPattern]:

@@ -13,7 +13,7 @@ __all__ = [
     "UnprocessableEntity",
 ]
 
-_MODULE = "djsonapi_client"
+_MODULE = "djsonapi_client_py"
 
 
 class DjsonApiClientError(Exception):

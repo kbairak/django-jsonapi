@@ -6,7 +6,7 @@ from unittest.mock import patch as _patch
 
 import pytest
 
-from djsonapi_client import Collection, DjsonApiSdk, Resource
+from djsonapi_client_py import Collection, DjsonApiSdk, Resource
 
 HOST = "http://testserver"
 

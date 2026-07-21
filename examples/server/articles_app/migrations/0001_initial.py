@@ -59,7 +59,7 @@ class Migration(migrations.Migration):
                 (
                     "categories",
                     models.ManyToManyField(
-                        related_name="articles", to="articles.category"
+                        related_name="articles", to="articles_app.category"
                     ),
                 ),
             ],

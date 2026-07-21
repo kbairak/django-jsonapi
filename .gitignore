@@ -9,4 +9,6 @@ wheels/
 # Virtual environments
 .venv
 
-src/articles_sdk
+# Generated SDKs (examples)
+examples/clienttest_py/articles_sdk/
+examples/clienttest_ts/articles_sdk/

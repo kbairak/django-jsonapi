@@ -4,7 +4,7 @@
 
 `./manage.py generate_jsonapi_client` inspects a `DjsonApi` instance and
 generates a typed async client SDK package for it. Most functionality lives in
-the existing `djsonapi_client` runtime; the generated code is a thin typed
+the existing `djsonapi_client_py` runtime; the generated code is a thin typed
 layer on top.
 
 ## Command
@@ -31,7 +31,7 @@ layer on top.
   resources.py     # generated: TypedDicts, Collection subclasses, Resource subclasses
   sdk.py           # generated: SDK subclass + module-level `sdk` singleton
   py.typed
-  _runtime/        # verbatim copy of djsonapi_client/*.py (aiohttp only dep)
+  _runtime/        # verbatim copy of djsonapi_client_py/*.py (aiohttp only dep)
     __init__.py
     collection.py
     exceptions.py
@@ -41,7 +41,7 @@ layer on top.
 
 No `pyproject.toml` — packaging is up to the user.
 
-## Runtime hooks (in `djsonapi_client`, backwards compatible)
+## Runtime hooks (in `djsonapi_client_py`, backwards compatible)
 
 The lazy client behavior is unchanged; generated subclasses opt into stricter
 behavior via ClassVars:
