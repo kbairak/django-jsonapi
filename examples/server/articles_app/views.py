@@ -21,7 +21,7 @@ api = DjsonApi()
 # Articles
 
 
-@api.get_many("articles")
+@api.get_many("articles", include_types=[UserResource])
 def get_articles(
     request: HttpRequest,
     filter__title__contains: str = "",
@@ -30,8 +30,9 @@ def get_articles(
     sort: Literal["title", "-title", "created_at", "-created_at"] = "-created_at",
     page__size: int = 10,
     page__number: int = 1,
+    include__author: bool = False,
 ) -> Response[list[ArticleResource]]:
-    qs = ArticleModel.objects.all()
+    qs = ArticleModel.objects.select_related("author").all()
 
     if sort == "title":
         qs = qs.order_by("title")
@@ -72,8 +73,16 @@ def get_articles(
             "page[size]": str(page__size),
         }
 
+    articles = list(qs)
+    included: set[UserResource] | None = None
+    if include__author:
+        included = set()
+        for article in articles:
+            included.add(UserResource(id=article.author.pk, username=article.author.username))
+
     return Response(
-        data=[ArticleResource.from_model(article) for article in qs],
+        data=[ArticleResource.from_model(article) for article in articles],
+        included=included,
         links=links,
         meta={"total": total},
     )

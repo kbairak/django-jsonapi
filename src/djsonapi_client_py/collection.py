@@ -114,7 +114,8 @@ class Collection[T: "Resource"](Sequence):
 
     def filter(self, **kwargs: Any) -> Self:
         return self.__class__(
-            self._sdk, self._url,
+            self._sdk,
+            self._url,
             {**self._params, **translate_query({f"filter__{k}": v for k, v in kwargs.items()})},
         )
 

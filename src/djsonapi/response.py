@@ -1,4 +1,4 @@
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
@@ -11,7 +11,7 @@ from .resource import Resource
 @dataclass
 class Response[T]:
     data: T | None = None
-    included: Sequence[Resource] | None = None
+    included: Collection[Resource] | None = None
     links: dict[str, dict[str, str | int]] | None = None
     meta: dict | None = None
     status: int = 200

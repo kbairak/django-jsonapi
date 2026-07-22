@@ -164,18 +164,18 @@ set `_read_fields`:
 ```python
 class User(Resource):
     _type: ClassVar = "users"
-    _attributes: ClassVar = ["username", "password_hash"]
-    _create_fields: ClassVar = ["username", "password_hash"]
-    _edit_fields: ClassVar = ["password_hash"]
-    _read_fields: ClassVar = ["username"]  # password_hash excluded from responses
+    _attributes: ClassVar = ["username", "last_login"]
+    _create_fields: ClassVar = ["username"]
+    _edit_fields: ClassVar = []
+    _read_fields: ClassVar = ["username"]  # last_login excluded from responses
 
     id: int
     username: str
-    password_hash: str
+    last_login: datetime.datetime | None = None
 ```
 
 When `_read_fields` is set, `serialize()` and `jsonschema_read()` only include
-the listed fields. Create and edit are unaffected — `password_hash` is still
+the listed fields. Create and edit are unaffected — `last_login` is still
 accepted in POST/PATCH, just never returned.
 
 When `_read_fields` is empty (default), all `_attributes` and relationships are

@@ -205,9 +205,7 @@ class TestHttpIntegration:
                     ]
                 },
             ):
-                exc = await self._assert_in_group(
-                    article_type.get("999"), NotFound
-                )
+                exc = await self._assert_in_group(article_type.get("999"), NotFound)
                 assert exc.detail == "Article not found"
 
     async def test_create_raises_bad_request(self, article_type):
@@ -225,9 +223,7 @@ class TestHttpIntegration:
                     ]
                 },
             ):
-                exc = await self._assert_in_group(
-                    article_type.create(title=""), BadRequest
-                )
+                exc = await self._assert_in_group(article_type.create(title=""), BadRequest)
                 assert exc.detail == "title is required"
 
     async def test_save_raises_conflict(self, article_type):
@@ -242,9 +238,7 @@ class TestHttpIntegration:
                     ]
                 },
             ):
-                exc = await self._assert_in_group(
-                    article.save(title="New"), Conflict
-                )
+                exc = await self._assert_in_group(article.save(title="New"), Conflict)
                 assert exc.detail == "Version mismatch"
 
     async def test_delete_raises_not_found(self, article_type):
