@@ -48,9 +48,13 @@ class Category(Resource):
 
 class User(Resource):
     _type: ClassVar = "users"
-    _attributes: ClassVar = ["username"]
+    _attributes: ClassVar = ["username", "password_hash"]
     _plural_relationships: ClassVar = ["articles"]
+    _create_fields: ClassVar = ["username", "password_hash"]
+    _edit_fields: ClassVar = ["password_hash"]
+    _read_fields: ClassVar = ["username", "articles"]
 
     id: int
     username: str
+    password_hash: str
     articles: list[int] | None = None

@@ -153,6 +153,33 @@ All configuration is done via `ClassVar` annotations on the class.
 | `_create_fields` | `list[str]` | Fields accepted in POST |
 | `_required_create_fields` | `list[str]` | Fields required in POST |
 | `_edit_fields` | `list[str]` | Fields accepted in PATCH |
+| `_read_fields` | `list[str]` | Fields included in responses (empty = all) |
+
+### Write-only fields
+
+By default, all fields in `_attributes` and all relationships appear in
+responses. To exclude sensitive fields (e.g. password hashes, internal flags),
+set `_read_fields`:
+
+```python
+class User(Resource):
+    _type: ClassVar = "users"
+    _attributes: ClassVar = ["username", "password_hash"]
+    _create_fields: ClassVar = ["username", "password_hash"]
+    _edit_fields: ClassVar = ["password_hash"]
+    _read_fields: ClassVar = ["username"]  # password_hash excluded from responses
+
+    id: int
+    username: str
+    password_hash: str
+```
+
+When `_read_fields` is set, `serialize()` and `jsonschema_read()` only include
+the listed fields. Create and edit are unaffected — `password_hash` is still
+accepted in POST/PATCH, just never returned.
+
+When `_read_fields` is empty (default), all `_attributes` and relationships are
+readable. This maintains backward compatibility.
 
 ### Relationship shorthands
 

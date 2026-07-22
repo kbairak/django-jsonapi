@@ -1,17 +1,17 @@
 # djsonapi — JSON:API for Django
 
-[JSON:API](https://jsonapi.org/) is a spec that makes you stop arguing about
-API design and start shipping. Every decision is made ahead of time — how
-attributes differ from relationships, how to request sparse fields, how to
-paginate, how to sideload related resources. One consistent wire format means
-one client generator, one docs strategy, one way to think.
+[JSON:API](https://jsonapi.org/) is a spec that makes you stop arguing about API
+design and start shipping. Every decision is made ahead of time — how attributes
+differ from relationships, how to request sparse fields, how to paginate, how to
+sideload related resources. One consistent wire format means one client
+generator, one docs strategy, one way to think.
 
 djsonapi gives you:
 
 - **Minimal Resource classes** — pydantic-adjacent, behave like dataclasses,
   type annotations drive everything
-- **FastAPI-style decorators** — JSON:API-aware, auto-validate, auto-parse
-  query params, generate OpenAPI
+- **FastAPI-style decorators** — JSON:API-aware, auto-validate, auto-parse query
+  params, generate OpenAPI
 - **Free OpenAPI 3.0.3 + Redoc docs** — at `/api/openapi.json` and `/api/docs/`
 - **Python & TypeScript SDKs** — generated from your API, sealed types, IDE
   autocomplete
@@ -91,15 +91,15 @@ Wire it up:
 urlpatterns = [path("api/", api.urls)]
 ```
 
-| Method | URL | What |
-|--------|-----|------|
-| `GET` | `/api/articles` | List |
-| `POST` | `/api/articles` | Create |
-| `GET` | `/api/articles/{id}` | Read |
-| `PATCH` | `/api/articles/{id}` | Update |
-| `DELETE` | `/api/articles/{id}` | Delete |
-| `GET` | `/api/openapi.json` | OpenAPI spec |
-| `GET` | `/api/docs/` | Redoc docs |
+| Method   | URL                  | What         |
+| -------- | -------------------- | ------------ |
+| `GET`    | `/api/articles`      | List         |
+| `POST`   | `/api/articles`      | Create       |
+| `GET`    | `/api/articles/{id}` | Read         |
+| `PATCH`  | `/api/articles/{id}` | Update       |
+| `DELETE` | `/api/articles/{id}` | Delete       |
+| `GET`    | `/api/openapi.json`  | OpenAPI spec |
+| `GET`    | `/api/docs/`         | Redoc docs   |
 
 ## What the library did for you
 
@@ -123,11 +123,14 @@ Visit `/api/docs/` after starting your server:
 One command generates a sealed, typed client:
 
 === "Python"
+
     ```bash
     ./manage.py generate_jsonapi_client articles.views::api \
         --output ~/articles_sdk --language python
     ```
+
 === "TypeScript"
+
     ```bash
     ./manage.py generate_jsonapi_client articles.views::api \
         --output ~/articles_sdk_ts --language typescript
@@ -136,6 +139,7 @@ One command generates a sealed, typed client:
 ### Usage
 
 === "Python"
+
     ```python
     from articles_sdk import sdk
 
@@ -152,7 +156,9 @@ One command generates a sealed, typed client:
         await article.save(title="New title")
         await article.delete()
     ```
+
 === "TypeScript"
+
     ```typescript
     import { sdk } from "./articles_sdk_ts/index.js";
 
@@ -168,10 +174,10 @@ One command generates a sealed, typed client:
     await article.delete();
     ```
 
-!!! tip "Why not a global singleton?"
-    The exported `sdk` is convenient for simple apps, but a single global config
-    is unsafe when background tasks make requests on behalf of different users
-    (e.g., OAuth). Instantiate separate SDKs with their own config:
+!!! tip "Why not a global singleton?" The exported `sdk` is convenient for
+simple apps, but a single global config is unsafe when background tasks make
+requests on behalf of different users (e.g., OAuth). Instantiate separate SDKs
+with their own config:
 
     ```python
     admin_sdk = SDK(host="...", headers=lambda: {"Authorization": "Bearer " + admin_token})

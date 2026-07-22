@@ -79,6 +79,7 @@ class Resource:
     _create_fields: ClassVar[list[str]] = []
     _required_create_fields: ClassVar[list[str]] = []
     _edit_fields: ClassVar[list[str]] = []
+    _read_fields: ClassVar[list[str]] = []
 
     @staticmethod
     def _normalize_relationships(
@@ -206,6 +207,18 @@ class Resource:
         }
 
     @classmethod
+    def _read_attr_fields(cls) -> list[str]:
+        if cls._read_fields:
+            return [f for f in cls._attributes if f in cls._read_fields]
+        return list(cls._attributes)
+
+    @classmethod
+    def _read_rel_names(cls) -> set[str]:
+        if cls._read_fields:
+            return {f for f in cls._rel_names() if f in cls._read_fields}
+        return cls._rel_names()
+
+    @classmethod
     def jsonschema_read(cls) -> dict:
         properties: dict[str, dict] = {
             "type": {"const": cls._type},
@@ -215,19 +228,19 @@ class Resource:
         properties["id"] = cls._field_schema("id")
         required.append("id")
 
-        if cls._attributes:
-            properties["attributes"] = cls._attr_schema(
-                list(cls._attributes), list(cls._attributes)
-            )
+        read_attrs = cls._read_attr_fields()
+        if read_attrs:
+            properties["attributes"] = cls._attr_schema(read_attrs, list(read_attrs))
             required.append("attributes")
 
-        if cls._singular_relationships or cls._plural_relationships:
-            rel_props = cls._relationship_properties(cls._rel_names())
+        read_rel_names = cls._read_rel_names()
+        if read_rel_names:
+            rel_props = cls._relationship_properties(read_rel_names)
             properties["relationships"] = {
                 "type": "object",
                 "properties": rel_props,
-                "required": [f for f, _ in cls._singular_relationships]
-                + [f for f, _ in cls._plural_relationships],
+                "required": [f for f, _ in cls._singular_relationships if f in read_rel_names]
+                + [f for f, _ in cls._plural_relationships if f in read_rel_names],
                 "additionalProperties": False,
             }
             required.append("relationships")
@@ -402,16 +415,24 @@ class Resource:
 
         return instance
 
+    def _read_filter(self) -> set[str] | None:
+        return set(self._read_fields) if self._read_fields else None
+
     def serialize(self) -> dict:
         result: dict = {"type": self._type}
         id_val = getattr(self, "id", UNSET)
         if id_val is not UNSET:
             result["id"] = str(id_val)
+        read_fields = self._read_filter()
         for field in self._attributes:
+            if read_fields and field not in read_fields:
+                continue
             value = getattr(self, field, UNSET)
             if value is not UNSET:
                 result.setdefault("attributes", {})[field] = self._serialize_value(value)
         for field, type_name in self._singular_relationships:
+            if read_fields and field not in read_fields:
+                continue
             value = getattr(self, field, UNSET)
             if value is not UNSET:
                 rel = {}
@@ -419,6 +440,8 @@ class Resource:
                     rel["data"] = {"type": type_name, "id": str(value)}
                 result.setdefault("relationships", {})[field] = rel
         for field, type_name in self._plural_relationships:
+            if read_fields and field not in read_fields:
+                continue
             value = getattr(self, field, UNSET)
             if value is not UNSET:
                 rel = {}

@@ -6,11 +6,14 @@ request happens until you `await` it (Python) or call `.fetch()` (TypeScript).
 ## Creating a Collection
 
 === "Python"
+
     ```python
     articles = sdk.articles.list()
     # No HTTP request — just stores URL and params
     ```
+
 === "TypeScript"
+
     ```typescript
     const articles = sdk.articles.list();
     // No HTTP request yet
@@ -18,11 +21,12 @@ request happens until you `await` it (Python) or call `.fetch()` (TypeScript).
 
 ## Chaining
 
-Every method returns a **new** `Collection` instance. The original is
-untouched — useful when you conditionally modify a query before sending it,
-similar to Django's `QuerySet`:
+Every method returns a **new** `Collection` instance. The original is untouched
+— useful when you conditionally modify a query before sending it, similar to
+Django's `QuerySet`:
 
 === "Python"
+
     ```python
     articles = sdk.articles.list()  # base query
 
@@ -35,7 +39,9 @@ similar to Django's `QuerySet`:
 
     result = await articles  # single HTTP request with all params
     ```
+
 === "TypeScript"
+
     ```typescript
     let articles = sdk.articles.list();  // base query
 
@@ -55,11 +61,14 @@ similar to Django's `QuerySet`:
 ### `filter()`
 
 === "Python"
+
     ```python
     articles = sdk.articles.list().filter(title__contains="json")
     # GET /articles?filter[title][contains]=json
     ```
+
 === "TypeScript"
+
     ```typescript
     const articles = sdk.articles.list().filter({ title__contains: "json" });
     // GET /articles?filter[title][contains]=json
@@ -68,11 +77,14 @@ similar to Django's `QuerySet`:
 ### `sort()`
 
 === "Python"
+
     ```python
     articles = sdk.articles.list().sort("-created_at", "title")
     # ?sort=-created_at,title
     ```
+
 === "TypeScript"
+
     ```typescript
     const articles = sdk.articles.list().sort("-created_at", "title");
     // ?sort=-created_at,title
@@ -81,6 +93,7 @@ similar to Django's `QuerySet`:
 ### `page()`
 
 === "Python"
+
     ```python
     articles = sdk.articles.list().page(2)
     # ?page=2
@@ -89,20 +102,29 @@ similar to Django's `QuerySet`:
     articles = sdk.articles.list().page(offset=20, limit=10)
     # ?page[offset]=20&page[limit]=10
     ```
+
 === "TypeScript"
+
     ```typescript
     const articles = sdk.articles.list().page(2);
     // ?page=2
+
+    # Named parameters
+    articles = sdk.articles.list().page({ offset: 20, limit: 10 })
+    // ?page[offset]=20&page[limit]=10
     ```
 
 ### `include()`
 
 === "Python"
+
     ```python
     articles = sdk.articles.list().include("author", "categories")
     # ?include=author,categories
     ```
+
 === "TypeScript"
+
     ```typescript
     const articles = sdk.articles.list().include("author", "categories");
     // ?include=author,categories
@@ -111,11 +133,14 @@ similar to Django's `QuerySet`:
 ### `fields()`
 
 === "Python"
+
     ```python
     articles = sdk.articles.list().fields(articles=["title", "created_at"])
     # ?fields[articles]=title,created_at
     ```
+
 === "TypeScript"
+
     ```typescript
     const articles = sdk.articles.list().fields({
         articles: ["title", "created_at"],
@@ -128,17 +153,23 @@ similar to Django's `QuerySet`:
 Non-standard query parameters:
 
 === "Python"
+
     ```python
     articles = sdk.articles.list().extra(custom_param="value")
+    # ?custom_param=value
     ```
+
 === "TypeScript"
+
     ```typescript
     const articles = sdk.articles.list().extra({ custom_param: "value" });
+    // ?custom_param=value
     ```
 
 ## Fetching
 
 === "Python"
+
     ```python
     articles = await sdk.articles.list()
     # GET /articles
@@ -156,7 +187,9 @@ Non-standard query parameters:
     col = sdk.articles.list()
     col[0]  # RuntimeError: Data not fetched yet
     ```
+
 === "TypeScript"
+
     ```typescript
     const articles = sdk.articles.list();
     await articles.fetch();
@@ -176,6 +209,7 @@ Non-standard query parameters:
 After fetch, navigate pages:
 
 === "Python"
+
     ```python
     col = await sdk.articles.list().page(1)
 
@@ -193,7 +227,9 @@ After fetch, navigate pages:
     async for article in col.all():
         print(article.title)
     ```
+
 === "TypeScript"
+
     ```typescript
     const col = await sdk.articles.list().page(1);
 
@@ -219,23 +255,24 @@ After fetch, navigate pages:
 
 ### Navigation methods
 
-| Method | Returns | Description |
-|--------|---------|-------------|
-| `has_next()` | `bool` | Next page available? |
-| `get_next()` | `Collection` | Fetch next page |
-| `has_previous()` | `bool` | Previous page available? |
-| `get_previous()` | `Collection` | Fetch previous page |
-| `has_first()` | `bool` | First page link exists? |
-| `get_first()` | `Collection` | Fetch first page |
-| `has_last()` | `bool` | Last page link exists? |
-| `get_last()` | `Collection` | Fetch last page |
+| Method           | Returns      | Description              |
+| ---------------- | ------------ | ------------------------ |
+| `has_next()`     | `bool`       | Next page available?     |
+| `get_next()`     | `Collection` | Fetch next page          |
+| `has_previous()` | `bool`       | Previous page available? |
+| `get_previous()` | `Collection` | Fetch previous page      |
+| `has_first()`    | `bool`       | First page link exists?  |
+| `get_first()`    | `Collection` | Fetch first page         |
+| `has_last()`     | `bool`       | Last page link exists?   |
+| `get_last()`     | `Collection` | Fetch last page          |
 
-These operate on the `links` object from JSON:API responses. Server must
-include pagination links (via `Response(links={...})`) for these to work.
+These operate on the `links` object from JSON:API responses. Server must include
+pagination links (via `Response(links={...})`) for these to work.
 
 ## Async iteration
 
 === "Python"
+
     ```python
     async for article in await sdk.articles.list():
         print(article.title)
@@ -243,6 +280,7 @@ include pagination links (via `Response(links={...})`) for these to work.
     `__aiter__` fetches first if needed, then yields items.
 
 === "TypeScript"
+
     ```typescript
     for await (const article of sdk.articles.list()) {
         console.log(article.title);
@@ -252,11 +290,12 @@ include pagination links (via `Response(links={...})`) for these to work.
 
 ## Immutability
 
-Collections are immutable. Every chainable method returns a new instance —
-the original is never modified. This lets you build queries conditionally
-without side effects, similar to Django's `QuerySet`:
+Collections are immutable. Every chainable method returns a new instance — the
+original is never modified. This lets you build queries conditionally without
+side effects, similar to Django's `QuerySet`:
 
 === "Python"
+
     ```python
     base = sdk.articles.list()
     filtered = base.filter(title__contains="json")
@@ -266,7 +305,9 @@ without side effects, similar to Django's `QuerySet`:
     assert base._params == {}
     assert filtered._params == {"filter[title][contains]": "json"}
     ```
+
 === "TypeScript"
+
     ```typescript
     const base = sdk.articles.list();
     const filtered = base.filter({ title__contains: "json" });

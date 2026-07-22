@@ -3,6 +3,7 @@
 ## Exception hierarchy
 
 === "Python"
+
     ```
     DjsonApiClientError
     ├── BadRequest            (400)
@@ -16,7 +17,9 @@
     ├── InternalServerError   (500)
     └── Http{N}               (any other status — dynamic class)
     ```
+
 === "TypeScript"
+
     ```
     DjsonApiClientError
     ├── BadRequest            (400)
@@ -34,6 +37,7 @@
 ## Raising
 
 === "Python"
+
     ```python
     from articles_sdk.exceptions import NotFound
 
@@ -45,7 +49,9 @@
             print(error.title)    # "Not Found"
             print(error.detail)   # server-provided detail message
     ```
+
 === "TypeScript"
+
     ```typescript
     import { NotFound } from "./articles_sdk_ts/index.js";
 
@@ -64,18 +70,19 @@
 
 Every error has:
 
-| Property | Type | Description |
-|----------|------|-------------|
+| Property | Type             | Description      |
+| -------- | ---------------- | ---------------- |
 | `status` | `int` / `number` | HTTP status code |
-| `title` | `str` / `string` | Short title |
+| `title`  | `str` / `string` | Short title      |
 | `detail` | `str` / `string` | Detailed message |
 
 ## Multiple errors
 
-When the server returns multiple errors in one response — every error is
-raised as an `ExceptionGroup`:
+When the server returns multiple errors in one response — every error is raised
+as an `ExceptionGroup`:
 
 === "Python"
+
     ```python
     try:
         article = await sdk.articles.create()
@@ -89,7 +96,9 @@ raised as an `ExceptionGroup`:
 
     Even a single error is wrapped in `ExceptionGroup`. Catch specific error
     types with `except*`.
+
 === "TypeScript"
+
     ```typescript
     try {
         await sdk.articles.create({});
@@ -110,11 +119,14 @@ raised as an `ExceptionGroup`:
 Unrecognized HTTP status codes get a dynamic exception class:
 
 === "Python"
+
     ```python
     # Server returns 418
     from articles_sdk.exceptions import Http418
     ```
+
 === "TypeScript"
+
     ```typescript
     // Server returns 418 — class created dynamically
     // Class is Http418
@@ -122,10 +134,11 @@ Unrecognized HTTP status codes get a dynamic exception class:
 
 ## Response parsing errors
 
-Errors during response parsing (malformed JSON, unexpected structure) raise
-the base exception type:
+Errors during response parsing (malformed JSON, unexpected structure) raise the
+base exception type:
 
 === "Python"
+
     ```python
     from djsonapi_client_py import DjsonApiClientError
     try:
@@ -133,7 +146,9 @@ the base exception type:
     except DjsonApiClientError as e:
         print(e)
     ```
+
 === "TypeScript"
+
     ```typescript
     import { DjsonApiClientError } from "./articles_sdk_ts/index.js";
     try {

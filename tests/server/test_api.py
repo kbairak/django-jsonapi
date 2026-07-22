@@ -51,6 +51,32 @@ class CategoryResource(Resource):
     name: str = ""
 
 
+class SecretResource(Resource):
+    _type: ClassVar = "secrets"
+    _attributes: ClassVar = ["public_val", "secret_val"]
+    _singular_relationships: ClassVar = [("owner", "users")]
+    _create_fields: ClassVar = ["public_val", "secret_val", "owner"]
+    _edit_fields: ClassVar = ["secret_val"]
+    _read_fields: ClassVar = ["public_val", "owner"]
+
+    id: int
+    public_val: str = ""
+    secret_val: str = ""
+
+
+class WithReadRelationshipsResource(Resource):
+    _type: ClassVar = "with_rel"
+    _attributes: ClassVar = ["name"]
+    _singular_relationships: ClassVar = [("author", "users")]
+    _plural_relationships: ClassVar = [("tags", "tags")]
+    _read_fields: ClassVar = ["name", "author"]
+
+    id: int
+    name: str = ""
+    author: int | None = None
+    tags: list[int] | None = None
+
+
 # ── Endpoint base class tests ─────────────────────────────────────────────
 
 
@@ -1510,3 +1536,49 @@ class TestBuildOpenapiSpec:
         view = api.combine_views(api.registry)
         resp = asyncio.run(view(req, article_id=1))
         assert resp.status_code == 204
+
+
+class TestReadFields:
+    def test_serialize_excludes_non_read_fields(self):
+        r = SecretResource(id=1, public_val="hello", secret_val="shh")
+        result = r.serialize()
+        assert result["attributes"]["public_val"] == "hello"
+        assert "secret_val" not in result["attributes"]
+
+    def test_serialize_includes_everything_when_no_read_fields(self):
+        r = Article(id=1, title="T", content="C")
+        result = r.serialize()
+        assert result["attributes"]["title"] == "T"
+        assert result["attributes"]["content"] == "C"
+
+    def test_serialize_excludes_relationship_not_in_read_fields(self):
+        r = WithReadRelationshipsResource(id=1, name="x")
+        r.tags = [1, 2]
+        r.author = 42
+        result = r.serialize()
+        assert "author" in result.get("relationships", {})
+        assert "tags" not in result.get("relationships", {})
+
+    def test_jsonschema_read_excludes_non_read_attributes(self):
+        schema = SecretResource.jsonschema_read()
+        attrs = schema["properties"]["attributes"]["properties"]
+        assert "public_val" in attrs
+        assert "secret_val" not in attrs
+
+    def test_jsonschema_read_excludes_non_read_rels(self):
+        schema = WithReadRelationshipsResource.jsonschema_read()
+        rel_props = schema["properties"]["relationships"]["properties"]
+        assert "author" in rel_props
+        assert "tags" not in rel_props
+
+    def test_jsonschema_read_required_only_read_rels(self):
+        schema = WithReadRelationshipsResource.jsonschema_read()
+        rel_required = schema["properties"]["relationships"]["required"]
+        assert "author" in rel_required
+        assert "tags" not in rel_required
+
+    def test_jsonschema_read_includes_all_when_no_read_fields(self):
+        schema = Article.jsonschema_read()
+        attrs = schema["properties"]["attributes"]["properties"]
+        assert "title" in attrs
+        assert "content" in attrs

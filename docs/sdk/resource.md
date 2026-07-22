@@ -5,6 +5,7 @@
 ### `get(id, *includes)`
 
 === "Python"
+
     ```python
     article = await sdk.articles.get(1)
     # GET /articles/1
@@ -12,7 +13,9 @@
     article = await sdk.articles.get(1, "author", "categories")
     # GET /articles/1?include=author,categories
     ```
+
 === "TypeScript"
+
     ```typescript
     const article = await sdk.articles.get(1);
     // GET /articles/1
@@ -26,6 +29,7 @@
 Fetch a single resource by filter. Asserts exactly one result.
 
 === "Python"
+
     ```python
     user = await sdk.users.find(username="admin")
     # GET /users?filter[username]=admin
@@ -33,7 +37,9 @@ Fetch a single resource by filter. Asserts exactly one result.
     article = await sdk.articles.find(title__contains="django", "author")
     # GET /articles?filter[title][contains]=django&include=author
     ```
+
 === "TypeScript"
+
     ```typescript
     const user = await sdk.users.find({ username: "admin" });
     // GET /users?filter[username]=admin
@@ -50,6 +56,7 @@ Fetch a single resource by filter. Asserts exactly one result.
 Returns a lazy `Collection` — see [Collections](collection.md).
 
 === "Python"
+
     ```python
     articles = sdk.articles.list()
     # No HTTP request yet
@@ -57,7 +64,9 @@ Returns a lazy `Collection` — see [Collections](collection.md).
     articles = await articles
     # GET /articles
     ```
+
 === "TypeScript"
+
     ```typescript
     const articles = sdk.articles.list();
     // No HTTP request yet
@@ -69,6 +78,7 @@ Returns a lazy `Collection` — see [Collections](collection.md).
 ## Creating
 
 === "Python"
+
     ```python
     article = await sdk.articles.create(
         title="New Post",
@@ -95,6 +105,7 @@ Returns a lazy `Collection` — see [Collections](collection.md).
     ```
 
 === "TypeScript"
+
     ```typescript
     const article = await sdk.articles.create({
         title: "New Post",
@@ -111,6 +122,7 @@ Available only if `@api.create_one` was registered.
 Two equivalent forms:
 
 === "Python"
+
     ```python
     # Form 1 — pass fields as kwargs
     await article.save(title="Updated", content="New content")
@@ -122,7 +134,9 @@ Two equivalent forms:
     await article.save("title", "content")
     # PATCH /articles/1
     ```
+
 === "TypeScript"
+
     ```typescript
     // Form 1 — pass fields as object
     await article.save({ title: "Updated", content: "New content" });
@@ -140,11 +154,14 @@ Two equivalent forms:
 Always hits the network, replaces local state:
 
 === "Python"
+
     ```python
     await article.refetch()
     # GET /articles/1
     ```
+
 === "TypeScript"
+
     ```typescript
     await article.refetch();
     // GET /articles/1
@@ -153,12 +170,15 @@ Always hits the network, replaces local state:
 ## Deleting
 
 === "Python"
+
     ```python
     await article.delete()
     # DELETE /articles/1  → 204
     # article.id is now None
     ```
+
 === "TypeScript"
+
     ```typescript
     await article.delete();
     // DELETE /articles/1  → 204
@@ -175,6 +195,7 @@ When a resource has a relationship, you access it as a regular attribute.
 Whether it's immediately usable depends on whether it was **included**.
 
 === "Python"
+
     ```python
     async with sdk:
         # Without include — unfetched stub
@@ -189,13 +210,15 @@ Whether it's immediately usable depends on whether it was **included**.
         article = await sdk.articles.get(1, "author")
         print(article.author.username)  # "jdoe", no extra HTTP call
     ```
+
 === "TypeScript"
+
     ```typescript
     // Without include — unfetched stub
     const article = await sdk.articles.get(1);
     // article.author is Resource — only knows id=42
 
-    await article.author;  // GET /articles/1/author
+    await article.author.fetch();  // GET /articles/1/author
     console.log(article.author.username);  // "jdoe"
 
     // With include — fully populated
@@ -208,6 +231,7 @@ Whether it's immediately usable depends on whether it was **included**.
 Plural relationships return a `Collection` instead of a single resource.
 
 === "Python"
+
     ```python
     article = await sdk.articles.get(1)
     # article.categories → unfetched Collection
@@ -221,7 +245,9 @@ Plural relationships return a `Collection` instead of a single resource.
     for cat in article.categories:
         print(cat.name)
     ```
+
 === "TypeScript"
+
     ```typescript
     const article = await sdk.articles.get(1);
     // article.categories → unfetched Collection
@@ -235,6 +261,7 @@ Plural relationships return a `Collection` instead of a single resource.
 ### Mutating relationships
 
 === "Python"
+
     ```python
     await article.add("categories", cat1, cat2)
     # POST /articles/1/relationship/categories
@@ -248,7 +275,9 @@ Plural relationships return a `Collection` instead of a single resource.
     await article.edit("author", new_author)
     # PATCH /articles/1/relationship/author (singular replace)
     ```
+
 === "TypeScript"
+
     ```typescript
     await article.add("categories", cat1, cat2);
     // POST /articles/1/relationship/categories
@@ -266,11 +295,14 @@ Plural relationships return a `Collection` instead of a single resource.
 After mutation, local relationship is invalidated. Next `await` fetches fresh:
 
 === "Python"
+
     ```python
     await article.add("categories", cat1)
     await article.categories  # GET /articles/1/categories
     ```
+
 === "TypeScript"
+
     ```typescript
     await article.add("categories", cat1);
     await article.categories.fetch();  // GET /articles/1/categories

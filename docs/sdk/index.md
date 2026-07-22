@@ -6,10 +6,10 @@ parameters — with full IDE autocomplete.
 
 ## How it works
 
-The server's `DjsonApi` registry holds every endpoint, resource class, and
-query parameter. The SDK generator reads this registry and writes plain source
-files. You copy the output directory into your project and install the
-dependencies manually (only `aiohttp` for Python, zero for TypeScript).
+The server's `DjsonApi` registry holds every endpoint, resource class, and query
+parameter. The SDK generator reads this registry and writes plain source files.
+You copy the output directory into your project and install the dependencies
+manually (only `aiohttp` for Python, zero for TypeScript).
 
 The generated package contains:
 
@@ -33,12 +33,14 @@ dependency on `djsonapi` itself.
 ## Python vs TypeScript
 
 === "Python"
+
     - Dependency: `aiohttp` (for async HTTP)
     - Async-only (`async with sdk:`, `await resource.save()`)
     - Dataclass-based Resource classes
     - `Collection` is `Sequence[T]` with lazy chaining
 
 === "TypeScript"
+
     - Zero npm dependencies (uses `fetch`, `URL`, `URLSearchParams`)
     - Async with native `fetch`
     - Class-based Resource with getters/setters
@@ -50,12 +52,15 @@ Generated SDKs are fully typed — every method, every parameter, every return
 value:
 
 === "Python"
+
     ```python
     # Your IDE knows sdk.articles is a type with .get(), .create(), .list()
     # It knows article.title is str, article.created_at is datetime
     # It knows article.save() accepts only writable fields
     ```
+
 === "TypeScript"
+
     ```typescript
     // Your IDE knows sdk.articles has .get(), .create(), .list()
     // It knows article.title is string, article.created_at is Date

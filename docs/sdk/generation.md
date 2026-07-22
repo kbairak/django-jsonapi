@@ -19,10 +19,13 @@
 ### Examples
 
 === "Python"
+
     ```bash
     ./manage.py generate_jsonapi_client articles.views::api --output ~/articles_sdk
     ```
+
 === "TypeScript"
+
     ```bash
     ./manage.py generate_jsonapi_client articles.views::api \
         --output ~/articles_sdk_ts --language typescript
@@ -31,6 +34,7 @@
 ## Output structure
 
 === "Python"
+
     ```
     articles_sdk/
     ├── __init__.py          # Re-exports SDK + resources
@@ -44,7 +48,9 @@
         ├── exceptions.py
         └── ...
     ```
+
 === "TypeScript"
+
     ```
     articles_sdk_ts/
     ├── index.ts             # Public exports
@@ -69,8 +75,8 @@ For each resource type in your API, the generator produces:
 - **Query methods** — typed filter/sort/page based on handler parameters
 - **Relationship methods** — `add`/`remove`/`reset`/`edit` only when the
   corresponding endpoints exist
-- **Type conversions** — annotated types drive runtime conversion (JSON string
-  → Python `datetime`, etc.)
+- **Type conversions** — annotated types drive runtime conversion (JSON string →
+  Python `datetime`, etc.)
 
 ## Capability gating
 
