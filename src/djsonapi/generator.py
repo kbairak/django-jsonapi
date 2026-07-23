@@ -32,6 +32,7 @@ from djsonapi.api import (
     GetOneEndpoint,
     RemoveFromRelationshipEndpoint,
     ResetRelationshipEndpoint,
+    RpcEndpoint,
 )
 from djsonapi.resource import Resource
 from djsonapi.response import Response
@@ -52,6 +53,7 @@ class _TypeSpec:
     allowed_sparse: dict[str, set[str]] = field(default_factory=dict)
     get_include_types: set[str] = field(default_factory=set)
     find_include_types: set[str] = field(default_factory=set)
+    rpc_actions: dict[str, str] = field(default_factory=dict)
 
     @property
     def class_name(self) -> str:
@@ -181,6 +183,8 @@ def _collect(api: DjsonApi) -> dict[str, _TypeSpec]:
             spec.rel_capabilities.setdefault(endpoint.relationship_name, set()).add("add")
         elif isinstance(endpoint, RemoveFromRelationshipEndpoint):
             spec.rel_capabilities.setdefault(endpoint.relationship_name, set()).add("remove")
+        elif isinstance(endpoint, RpcEndpoint):
+            spec.rpc_actions[endpoint.action_name] = endpoint.method
 
     for spec in specs.values():
         cls = spec.resource_class
@@ -432,6 +436,19 @@ def _render_resource_class(
                 f"async def {cap}(self, relationship: str, *resources: Any) -> None:",
                 f"    return await super().{cap}(relationship, *resources)",
             ]
+
+    if spec.rpc_actions:
+        renderer.imports.add("from typing import Any")
+        renderer.imports.add("from typing import Literal")
+        actions_repr = ", ".join(f"{a!r}: {m!r}" for a, m in spec.rpc_actions.items())
+        body.append("")
+        body.append(f"_rpc_methods: ClassVar[dict[str, str]] = {{{actions_repr}}}")
+        actions_literal = " | ".join(f"{a!r}" for a in spec.rpc_actions)
+        body.append("")
+        body += [
+            f"async def rpc(self, action: Literal[{actions_literal}], payload: Any = None, mimetype: str | None = None) -> Any:",
+            "    return await super().rpc(action, payload=payload, mimetype=mimetype)",
+        ]
 
     lines += _indent(body)
     return lines
@@ -930,6 +947,18 @@ def _render_ts_resource_class(
                 f"    await super.{cap}(relationship, ...resources);",
                 "  }",
             ]
+
+    if spec.rpc_actions:
+        actions_repr = ", ".join(f"{a!r}: {m!r}" for a, m in spec.rpc_actions.items())
+        body.append("")
+        body.append(f"  static _rpcMethods: Record<string, string> = {{{actions_repr}}}")
+        actions_literal = " | ".join(f"'{a}'" for a in spec.rpc_actions)
+        body.append("")
+        body += [
+            f"  async rpc(action: {actions_literal}, payload?: unknown, mimetype?: string): Promise<any> {{",
+            "    return super.rpc(action as string, payload, mimetype);",
+            "  }",
+        ]
 
     lines += _indent(body)
     lines.append("}")

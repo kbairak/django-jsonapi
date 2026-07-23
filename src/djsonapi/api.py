@@ -1054,6 +1054,100 @@ class RemoveFromRelationshipEndpoint(
     SUCCESS_STATUS: ClassVar[int] = 204
 
 
+@dataclass(kw_only=True)
+class RpcEndpoint(ExpectsIdMixin, Endpoint):
+    SUCCESS_STATUS: ClassVar[int] = 200
+    action_name: str
+    path_operation: dict | None = None
+    method: str = "POST"
+
+    @functools.cached_property
+    def url(self):
+        path_type = _path_type(self.pk_type)
+        return f"{self.type_name}/<{path_type}:{self.pk_name}>/{self.action_name}"
+
+    @property
+    def url_name(self):
+        return f"{self.type_name}__rpc__{self.action_name}"
+
+    async def view(self, request: HttpRequest, **url_kwargs: Any) -> Any:
+        remaining_params = request.GET.dict()
+        kwargs, errors = self._get_kwargs(request, url_kwargs, remaining_params)
+        for unknown in sorted(remaining_params):
+            errors.append(
+                BadRequest(f"Unknown query parameter: {unknown}", source={"parameter": unknown})
+            )
+        remaining_params.clear()
+        if errors:
+            raise DjsonApiExceptionMulti(*errors)
+        if asyncio.iscoroutinefunction(self.handler):
+            result = await self.handler(request, **kwargs)
+        else:
+            result = await sync_to_async(self.handler)(request, **kwargs)
+        if isinstance(result, HttpResponse):
+            return result
+        if isinstance(result, Response):
+            return result.serialize(request)
+        return result
+
+    def _get_kwargs(
+        self,
+        request: HttpRequest,
+        url_kwargs: dict[str, Any],
+        remaining_params: dict[str, str] | None = None,
+    ) -> tuple[dict[str, Any], list[DjsonApiExceptionSingle]]:
+        kwargs = {}
+        errors: list[DjsonApiExceptionSingle] = []
+
+        if self.pk_name in url_kwargs:
+            raw = url_kwargs[self.pk_name]
+            try:
+                pk_value = self.pk_type(raw)
+            except Exception:
+                raise NotFound("The URL does not exist")
+            kwargs[self.pk_name] = pk_value
+
+        if request.body:
+            try:
+                body = json.loads(request.body)
+            except json.JSONDecodeError as e:
+                return kwargs, [BadRequest(f"Invalid JSON: {e}")]
+            if isinstance(body, dict):
+                kwargs.update(body)
+
+        return kwargs, errors
+
+    def _openapi_operation(self) -> dict:
+        result = {}
+        result["requestBody"] = {
+            "required": False,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "description": "Arbitrary RPC parameters",
+                    }
+                }
+            },
+        }
+        result["responses"] = {
+            "200": {
+                "description": "OK",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "description": "RPC response",
+                        }
+                    }
+                },
+            }
+        }
+        if self.path_operation:
+            _merge_openapi_into(result, self.path_operation)
+        return result
+
+
 def _validate_content_type(request: HttpRequest) -> None:
     if request.method not in ("POST", "PATCH", "DELETE"):
         return
@@ -1295,6 +1389,23 @@ class DjsonApi:
 
         return decorator
 
+    def rpc(
+        self,
+        type_name: str,
+        action: str,
+        path_operation: dict | None = None,
+        method: str = "POST",
+    ) -> Callable[[Callable[..., Any]], Endpoint]:
+        def decorator(handler: Callable[..., Any]) -> Endpoint:
+            endpoint = RpcEndpoint(
+                type_name, handler, action_name=action,
+                path_operation=path_operation, method=method,
+            )
+            self.registry.append(endpoint)
+            return endpoint
+
+        return decorator
+
     def _auto_derive_relationship_endpoints(self):
         existing = {
             (ep.type_name, ep.relationship_name)
@@ -1414,7 +1525,7 @@ class DjsonApi:
             op = endpoint._openapi_operation()
             op["tags"] = [type_name]
             op["summary"] = summary
-            method = endpoint.METHOD.lower()
+            method = (getattr(endpoint, 'method', None) or endpoint.METHOD).lower()
 
             if "responses" not in op:
                 op["responses"] = {
@@ -1475,19 +1586,23 @@ class DjsonApi:
         return spec
 
     def combine_views(self, endpoints: list[Endpoint]) -> Callable[..., Any]:
-        by_method: dict[str, Endpoint] = {endpoint.METHOD: endpoint for endpoint in endpoints}
+        by_method: dict[str, Endpoint] = {
+            getattr(endpoint, 'method', None) or endpoint.METHOD: endpoint
+            for endpoint in endpoints
+        }
 
         @csrf_exempt
         async def view(request: HttpRequest, *args, **kwargs):
             try:
-                _validate_accept(request)
                 if request.method not in by_method:
                     raise MethodNotAllowed(
                         f"Method {request.method} not allowed for this endpoint, "
                         f"allowed methods: {', '.join(by_method.keys())}"
                     )
                 endpoint = by_method[request.method]
-                _validate_content_type(request)
+                if not isinstance(endpoint, RpcEndpoint):
+                    _validate_accept(request)
+                    _validate_content_type(request)
                 result = await endpoint.view(request, *args, **kwargs)
             except DjsonApiException as exc:
                 return _jsonapi_response(

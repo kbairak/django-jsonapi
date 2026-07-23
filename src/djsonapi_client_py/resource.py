@@ -83,6 +83,7 @@ class Resource:
     _capabilities: ClassVar[frozenset[str]] = ALL_CAPABILITIES
     _relationship_capabilities: ClassVar[dict[str, frozenset[str]] | None] = None
     _collection_class: ClassVar[type[Collection[Any]]] = Collection
+    _rpc_methods: ClassVar[dict[str, str]] = {}
 
     @classmethod
     def _check_capability(cls, operation: str) -> None:
@@ -581,6 +582,22 @@ class Resource:
         else:
             url = rel.get("links", {}).get("related", "")
             self._related[name] = Collection(self._sdk, url, _data=None)
+
+    async def rpc(self, action: str, payload: Any = None, mimetype: str | None = None) -> Any:
+        assert self._sdk._session is not None
+        assert self.id is not None
+        method = self._rpc_methods.get(action, "POST")
+        url = f"{self._type}/{self.id}/{action}"
+        http_method = getattr(self._sdk._session, method.lower())
+        headers = {"Content-Type": mimetype} if mimetype else None
+        json_data = None if mimetype else payload
+        data = payload if mimetype else None
+        logger.debug("%s %s body=%s", method, url, payload)
+        async with http_method(url, json=json_data, data=data, headers=headers) as resp:
+            try:
+                return await resp.json(content_type=None)
+            except Exception:
+                return await resp.read()
 
     async def _mutate_relationship(self, method: str, relationship: str, data: list[dict]) -> None:
         assert self._sdk._session is not None

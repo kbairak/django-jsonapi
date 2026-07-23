@@ -1188,9 +1188,9 @@ request happens until you <code>await</code> it (Python) or call <code>.fetch()<
 </div>
 </div>
 <h2 id="chaining">Chaining</h2>
-<p>Every method returns a <strong>new</strong> <code>Collection</code> instance. The original is
-untouched — useful when you conditionally modify a query before sending it,
-similar to Django's <code>QuerySet</code>:</p>
+<p>Every method returns a <strong>new</strong> <code>Collection</code> instance. The original is untouched
+— useful when you conditionally modify a query before sending it, similar to
+Django's <code>QuerySet</code>:</p>
 <div class="tabbed-set tabbed-alternate" data-tabs="2:2"><input checked="checked" id="__tabbed_2_1" name="__tabbed_2" type="radio" /><input id="__tabbed_2_2" name="__tabbed_2" type="radio" /><div class="tabbed-labels"><label for="__tabbed_2_1">Python</label><label for="__tabbed_2_2">TypeScript</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
@@ -1228,12 +1228,8 @@ similar to Django's <code>QuerySet</code>:</p>
 <div class="tabbed-set tabbed-alternate" data-tabs="3:2"><input checked="checked" id="__tabbed_3_1" name="__tabbed_3" type="radio" /><input id="__tabbed_3_2" name="__tabbed_3" type="radio" /><div class="tabbed-labels"><label for="__tabbed_3_1">Python</label><label for="__tabbed_3_2">TypeScript</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1"># Short form (filter__ prefix auto-added)</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">articles</span> <span class="o">=</span> <span class="n">sdk</span><span class="o">.</span><span class="n">articles</span><span class="o">.</span><span class="n">list</span><span class="p">()</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">title__contains</span><span class="o">=</span><span class="s2">&quot;json&quot;</span><span class="p">)</span>
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="c1"># GET /articles?filter[title][contains]=json</span>
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>
-<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="c1"># Also works with explicit prefix</span>
-<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="n">articles</span> <span class="o">=</span> <span class="n">sdk</span><span class="o">.</span><span class="n">articles</span><span class="o">.</span><span class="n">list</span><span class="p">()</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">filter__title__contains</span><span class="o">=</span><span class="s2">&quot;json&quot;</span><span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">articles</span> <span class="o">=</span> <span class="n">sdk</span><span class="o">.</span><span class="n">articles</span><span class="o">.</span><span class="n">list</span><span class="p">()</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">title__contains</span><span class="o">=</span><span class="s2">&quot;json&quot;</span><span class="p">)</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="c1"># GET /articles?filter[title][contains]=json</span>
 </code></pre></div>
 </div>
 <div class="tabbed-block">
@@ -1273,6 +1269,10 @@ similar to Django's <code>QuerySet</code>:</p>
 <div class="tabbed-block">
 <div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="kd">const</span><span class="w"> </span><span class="nx">articles</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">sdk</span><span class="p">.</span><span class="nx">articles</span><span class="p">.</span><span class="nx">list</span><span class="p">().</span><span class="nx">page</span><span class="p">(</span><span class="mf">2</span><span class="p">);</span>
 <a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="c1">// ?page=2</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="err">#</span><span class="w"> </span><span class="nx">Named</span><span class="w"> </span><span class="nx">parameters</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="nx">articles</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">sdk</span><span class="p">.</span><span class="nx">articles</span><span class="p">.</span><span class="nx">list</span><span class="p">().</span><span class="nx">page</span><span class="p">({</span><span class="w"> </span><span class="nx">offset</span><span class="o">:</span><span class="w"> </span><span class="kt">20</span><span class="p">,</span><span class="w"> </span><span class="nx">limit</span><span class="o">:</span><span class="w"> </span><span class="kt">10</span><span class="w"> </span><span class="p">})</span>
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="c1">// ?page[offset]=20&amp;page[limit]=10</span>
 </code></pre></div>
 </div>
 </div>
@@ -1315,10 +1315,12 @@ similar to Django's <code>QuerySet</code>:</p>
 <div class="tabbed-content">
 <div class="tabbed-block">
 <div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="n">articles</span> <span class="o">=</span> <span class="n">sdk</span><span class="o">.</span><span class="n">articles</span><span class="o">.</span><span class="n">list</span><span class="p">()</span><span class="o">.</span><span class="n">extra</span><span class="p">(</span><span class="n">custom_param</span><span class="o">=</span><span class="s2">&quot;value&quot;</span><span class="p">)</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="c1"># ?custom_param=value</span>
 </code></pre></div>
 </div>
 <div class="tabbed-block">
 <div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="kd">const</span><span class="w"> </span><span class="nx">articles</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nx">sdk</span><span class="p">.</span><span class="nx">articles</span><span class="p">.</span><span class="nx">list</span><span class="p">().</span><span class="nx">extra</span><span class="p">({</span><span class="w"> </span><span class="nx">custom_param</span><span class="o">:</span><span class="w"> </span><span class="s2">&quot;value&quot;</span><span class="w"> </span><span class="p">});</span>
+<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a><span class="c1">// ?custom_param=value</span>
 </code></pre></div>
 </div>
 </div>
@@ -1351,6 +1353,8 @@ similar to Django's <code>QuerySet</code>:</p>
 <a id="__codelineno-18-7" name="__codelineno-18-7" href="#__codelineno-18-7"></a><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="kd">const</span><span class="w"> </span><span class="nx">a</span><span class="w"> </span><span class="k">of</span><span class="w"> </span><span class="nx">articles</span><span class="p">)</span><span class="w"> </span><span class="p">{</span><span class="w">   </span><span class="c1">// iterate</span>
 <a id="__codelineno-18-8" name="__codelineno-18-8" href="#__codelineno-18-8"></a><span class="w">    </span><span class="nx">console</span><span class="p">.</span><span class="nx">log</span><span class="p">(</span><span class="nx">a</span><span class="p">.</span><span class="nx">title</span><span class="p">);</span>
 <a id="__codelineno-18-9" name="__codelineno-18-9" href="#__codelineno-18-9"></a><span class="p">}</span>
+<a id="__codelineno-18-10" name="__codelineno-18-10" href="#__codelineno-18-10"></a><span class="c1">// Use spread for array methods</span>
+<a id="__codelineno-18-11" name="__codelineno-18-11" href="#__codelineno-18-11"></a><span class="kd">const</span><span class="w"> </span><span class="nx">titles</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">[...</span><span class="nx">articles</span><span class="p">].</span><span class="nx">map</span><span class="p">(</span><span class="nx">a</span><span class="w"> </span><span class="p">=&gt;</span><span class="w"> </span><span class="nx">a</span><span class="p">.</span><span class="nx">title</span><span class="p">);</span>
 </code></pre></div>
 </div>
 </div>
@@ -1454,8 +1458,8 @@ similar to Django's <code>QuerySet</code>:</p>
 </tr>
 </tbody>
 </table>
-<p>These operate on the <code>links</code> object from JSON:API responses. Server must
-include pagination links (via <code>Response(links={...})</code>) for these to work.</p>
+<p>These operate on the <code>links</code> object from JSON:API responses. Server must include
+pagination links (via <code>Response(links={...})</code>) for these to work.</p>
 <h2 id="async-iteration">Async iteration</h2>
 <div class="tabbed-set tabbed-alternate" data-tabs="11:2"><input checked="checked" id="__tabbed_11_1" name="__tabbed_11" type="radio" /><input id="__tabbed_11_2" name="__tabbed_11" type="radio" /><div class="tabbed-labels"><label for="__tabbed_11_1">Python</label><label for="__tabbed_11_2">TypeScript</label></div>
 <div class="tabbed-content">
@@ -1475,9 +1479,9 @@ include pagination links (via <code>Response(links={...})</code>) for these to w
 </div>
 </div>
 <h2 id="immutability">Immutability</h2>
-<p>Collections are immutable. Every chainable method returns a new instance —
-the original is never modified. This lets you build queries conditionally
-without side effects, similar to Django's <code>QuerySet</code>:</p>
+<p>Collections are immutable. Every chainable method returns a new instance — the
+original is never modified. This lets you build queries conditionally without
+side effects, similar to Django's <code>QuerySet</code>:</p>
 <div class="tabbed-set tabbed-alternate" data-tabs="12:2"><input checked="checked" id="__tabbed_12_1" name="__tabbed_12" type="radio" /><input id="__tabbed_12_2" name="__tabbed_12" type="radio" /><div class="tabbed-labels"><label for="__tabbed_12_1">Python</label><label for="__tabbed_12_2">TypeScript</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">

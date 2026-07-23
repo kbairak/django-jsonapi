@@ -26,6 +26,7 @@ export class Resource {
   static _sdk: DjsonApiSdk | null = null
   static _relationshipTypes: Record<string, [string, boolean]> = {}
   static _collectionClass: typeof Collection = Collection
+  static _rpcMethods: Record<string, string> = {}
 
   get _sdk(): DjsonApiSdk {
     return (this.constructor as typeof Resource)._sdk!
@@ -384,6 +385,30 @@ export class Resource {
       relationship,
       this._mutationRis(relationship, resources),
     )
+  }
+
+  async rpc(action: string, payload?: unknown, mimetype?: string): Promise<any> {
+    const method = (this.constructor as typeof Resource)._rpcMethods[action] ?? "POST"
+    const url = new URL(`${this._type}/${this.id}/${action}`, this._sdk.host).toString()
+    const headers: Record<string, string> = {}
+    let body: BodyInit | undefined
+    if (payload !== undefined) {
+      if (mimetype) {
+        headers["content-type"] = mimetype
+        body = JSON.stringify(payload)
+      } else {
+        body = JSON.stringify(payload)
+      }
+    }
+    const res = await fetch(url, { method, headers, body })
+    if (!res.ok) {
+      const text = await res.text()
+      let parsed: any
+      try { parsed = JSON.parse(text) } catch { throw new Error(`RPC failed: ${res.status}`) }
+      this._sdk._raiseForStatus(res.status, parsed)
+    }
+    const text = await res.text()
+    try { return JSON.parse(text) } catch { return text }
   }
 
   async edit(relationship: string, resource: unknown): Promise<void> {

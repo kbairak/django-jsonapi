@@ -340,6 +340,140 @@ Set `sparse=False` to disable. `fields[TYPE]` parameters rejected with 400.
 Declare valid include target types. Invalid includes → `400`. Feeds OpenAPI
 parameter descriptions.
 
+## RPC endpoints
+
+RPC (Remote Procedure Call) endpoints let you define non-CRUD actions on a
+resource — publish, archive, approve, regenerate, whatever doesn't fit into
+`get`/`create`/`edit`/`delete`.
+
+### `@api.rpc()`
+
+```python
+@api.rpc("articles", "publish", method="PUT")
+def publish_article(request, article_id: int) -> JsonResponse:
+    ...
+```
+
+- URL: `PUT /api/articles/{id}/publish`
+- Handler receives the resource ID as a path parameter
+- No JSON:API request body parsing — handler gets raw `HttpRequest`
+- Can return any Django response type (`JsonResponse`, `HttpResponse`, etc.)
+- No automatic serialization — you control the response content
+
+### Parameters
+
+`@api.rpc(type_name, action, path_operation, method)`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `type_name` | `str` | — | Resource type name (e.g. `"articles"`) |
+| `action` | `str` | — | URL path segment and identifier (`"publish"`) |
+| `path_operation` | `dict` | `{}` | OpenAPI operation spec merged into the endpoint |
+| `method` (last positional) | `str` | `"POST"` | HTTP method (`"POST"`, `"PUT"`, etc.) |
+
+URL pattern: `/{type_name}/{id}/{action}` — no `/rpc/` prefix.
+
+### OpenAPI spec via `path_operation`
+
+The `path_operation` dict is merged directly into the generated OpenAPI path item.
+Use it to document request/response schemas:
+
+```python
+@api.rpc(
+    "articles",
+    "publish",
+    {
+        "summary": "Publish an article",
+        "requestBody": {
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "notify": {"type": "boolean"},
+                        },
+                    }
+                }
+            }
+        },
+        "responses": {
+            "200": {
+                "description": "Publish result",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "success": {"type": "boolean"},
+                                "published": {"type": "boolean"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+)
+def publish_article(request, article_id: int) -> JsonResponse:
+    article = Article.objects.get(id=article_id)
+    article.published = True
+    article.save()
+    return JsonResponse({"success": True, "published": True})
+```
+
+Without `path_operation`, the endpoint appears in OpenAPI but has no
+request/response schemas — the consumer sees `{}` for both.
+
+### Errors
+
+RPC endpoints don't have an `errors=` parameter. Raise exceptions normally:
+
+```python
+from djsonapi.exceptions import NotFound
+
+@api.rpc("articles", "publish")
+def publish_article(request, article_id: int) -> JsonResponse:
+    try:
+        article = Article.objects.get(id=article_id)
+    except Article.DoesNotExist:
+        raise NotFound()
+    ...
+```
+
+To document error responses, include them in `path_operation`:
+
+```python
+@api.rpc("articles", "publish", {
+    "responses": {
+        "404": {"description": "Article not found"},
+        "200": {"description": "OK", ...},
+    },
+})
+```
+
+### SDK integration
+
+RPC endpoints appear in the generated SDK as a typed `rpc()` method with
+action names as `Literal` types:
+
+=== "Python"
+
+    ```python
+    article = await sdk.articles.get(1)
+    result = await article.rpc('publish')
+    # PUT /articles/1/publish
+    ```
+
+=== "TypeScript"
+
+    ```typescript
+    const article = await sdk.articles.get(1);
+    const result = await article.rpc('publish');
+    // PUT /articles/1/publish
+    ```
+
+See [SDK Resources & CRUD → RPC](../sdk/resource.md#rpc) for runtime details.
+
 ## URL names
 
 Every endpoint gets a URL name for `reverse()` lookups:

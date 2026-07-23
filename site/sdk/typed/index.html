@@ -1014,8 +1014,8 @@
 
 
 <h1 id="typed-features">Typed Features</h1>
-<p>The generated SDK is more than just a generic HTTP client. It mirrors your
-API's exact type system.</p>
+<p>The generated SDK is more than just a generic HTTP client. It mirrors your API's
+exact type system.</p>
 <h2 id="sealed-resource-types">Sealed resource types</h2>
 <p>The generated <code>SDK</code> subclass only exposes resource types that exist on your
 server:</p>
@@ -1035,12 +1035,12 @@ server:</p>
 </div>
 </div>
 </div>
-<p>The generic <code>DjsonApiSdk</code> creates resource classes on the fly for any
-attribute. The generated <code>SDK</code> subclass overrides this with a sealed registry —
-only the types declared in your API are accepted.</p>
+<p>The generic <code>DjsonApiSdk</code> creates resource classes on the fly for any attribute.
+The generated <code>SDK</code> subclass overrides this with a sealed registry — only the
+types declared in your API are accepted.</p>
 <h2 id="type-conversions">Type conversions</h2>
-<p>Annotated types drive runtime conversion between JSON:API wire format and
-native types:</p>
+<p>Annotated types drive runtime conversion between JSON:API wire format and native
+types:</p>
 <table>
 <thead>
 <tr>
@@ -1202,9 +1202,9 @@ parameters matching your endpoint's declared query parameters:</p>
 <div class="tabbed-content">
 <div class="tabbed-block">
 <div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="n">articles</span> <span class="o">=</span> <span class="n">sdk</span><span class="o">.</span><span class="n">articles</span><span class="o">.</span><span class="n">list</span><span class="p">()</span>
-<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="c1"># .filter() accepts only filter__ params your handler declared</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="c1"># .filter() accepts only params your handler declared</span>
 <a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="n">articles</span><span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">title__contains</span><span class="o">=</span><span class="s2">&quot;django&quot;</span><span class="p">)</span>
-<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="c1"># ❌ TypeError: articles.filter(filter__nonexistent=...)  — unknown param</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="c1"># ❌ TypeError: articles.filter(nonexistent=...)  — unknown param</span>
 </code></pre></div>
 </div>
 <div class="tabbed-block">

@@ -474,6 +474,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#write-only-fields" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Write-only fields
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#relationship-shorthands" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1074,6 +1085,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#write-only-fields" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Write-only fields
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#relationship-shorthands" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -1335,15 +1357,40 @@ this field" from "client sent <code>null</code>".</p>
 <td><code>list[str]</code></td>
 <td>Fields accepted in PATCH</td>
 </tr>
+<tr>
+<td><code>_read_fields</code></td>
+<td><code>list[str]</code></td>
+<td>Fields included in responses (empty = all)</td>
+</tr>
 </tbody>
 </table>
+<h3 id="write-only-fields">Write-only fields</h3>
+<p>By default, all fields in <code>_attributes</code> and all relationships appear in
+responses. To exclude sensitive fields (e.g. password hashes, internal flags),
+set <code>_read_fields</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="k">class</span><span class="w"> </span><span class="nc">User</span><span class="p">(</span><span class="n">Resource</span><span class="p">):</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>    <span class="n">_type</span><span class="p">:</span> <span class="n">ClassVar</span> <span class="o">=</span> <span class="s2">&quot;users&quot;</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>    <span class="n">_attributes</span><span class="p">:</span> <span class="n">ClassVar</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;username&quot;</span><span class="p">,</span> <span class="s2">&quot;last_login&quot;</span><span class="p">]</span>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>    <span class="n">_create_fields</span><span class="p">:</span> <span class="n">ClassVar</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;username&quot;</span><span class="p">]</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>    <span class="n">_edit_fields</span><span class="p">:</span> <span class="n">ClassVar</span> <span class="o">=</span> <span class="p">[]</span>
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>    <span class="n">_read_fields</span><span class="p">:</span> <span class="n">ClassVar</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;username&quot;</span><span class="p">]</span>  <span class="c1"># last_login excluded from responses</span>
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>
+<a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>    <span class="nb">id</span><span class="p">:</span> <span class="nb">int</span>
+<a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a>    <span class="n">username</span><span class="p">:</span> <span class="nb">str</span>
+<a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a>    <span class="n">last_login</span><span class="p">:</span> <span class="n">datetime</span><span class="o">.</span><span class="n">datetime</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</code></pre></div>
+<p>When <code>_read_fields</code> is set, <code>serialize()</code> and <code>jsonschema_read()</code> only include
+the listed fields. Create and edit are unaffected — <code>last_login</code> is still
+accepted in POST/PATCH, just never returned.</p>
+<p>When <code>_read_fields</code> is empty (default), all <code>_attributes</code> and relationships are
+readable. This maintains backward compatibility.</p>
 <h3 id="relationship-shorthands">Relationship shorthands</h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="c1"># str — field name and JSON:API type are the same</span>
-<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="n">_singular_relationships</span><span class="p">:</span> <span class="n">ClassVar</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;author&quot;</span><span class="p">]</span>
-<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="c1"># equivalent to: (&quot;author&quot;, &quot;author&quot;)</span>
-<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>
-<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="c1"># tuple — (field_name, jsonapi_type)</span>
-<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="n">_singular_relationships</span><span class="p">:</span> <span class="n">ClassVar</span> <span class="o">=</span> <span class="p">[(</span><span class="s2">&quot;author&quot;</span><span class="p">,</span> <span class="s2">&quot;users&quot;</span><span class="p">)]</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1"># str — field name and JSON:API type are the same</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="n">_singular_relationships</span><span class="p">:</span> <span class="n">ClassVar</span> <span class="o">=</span> <span class="p">[</span><span class="s2">&quot;author&quot;</span><span class="p">]</span>
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="c1"># equivalent to: (&quot;author&quot;, &quot;author&quot;)</span>
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>
+<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="c1"># tuple — (field_name, jsonapi_type)</span>
+<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="n">_singular_relationships</span><span class="p">:</span> <span class="n">ClassVar</span> <span class="o">=</span> <span class="p">[(</span><span class="s2">&quot;author&quot;</span><span class="p">,</span> <span class="s2">&quot;users&quot;</span><span class="p">)]</span>
 </code></pre></div>
 <p>String form when field name matches the JSON:API type. Tuple form when they
 diverge (e.g., <code>author</code> field → <code>users</code> type).</p>
@@ -1405,31 +1452,31 @@ conversion:</p>
 <h3 id="serialize"><code>serialize()</code></h3>
 <p>Produces the JSON:API wire representation. Called internally by the framework
 when building responses:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">resource</span><span class="o">.</span><span class="n">serialize</span><span class="p">()</span>
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="c1"># {&quot;type&quot;: &quot;articles&quot;, &quot;id&quot;: &quot;1&quot;, &quot;attributes&quot;: {...}, &quot;relationships&quot;: {...}}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="n">resource</span><span class="o">.</span><span class="n">serialize</span><span class="p">()</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="c1"># {&quot;type&quot;: &quot;articles&quot;, &quot;id&quot;: &quot;1&quot;, &quot;attributes&quot;: {...}, &quot;relationships&quot;: {...}}</span>
 </code></pre></div>
 <h3 id="_from_jsonapi_payload"><code>_from_jsonapi_payload()</code></h3>
 <p>Parses a JSON:API request body back into a Resource instance. The decorators
 call this before passing the payload to your handler:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="n">body</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;data&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;articles&quot;</span><span class="p">,</span> <span class="s2">&quot;attributes&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;New&quot;</span><span class="p">}}}</span>
-<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="n">resource</span> <span class="o">=</span> <span class="n">ArticleResource</span><span class="o">.</span><span class="n">_from_jsonapi_payload</span><span class="p">(</span><span class="n">body</span><span class="p">,</span> <span class="n">fields</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;title&quot;</span><span class="p">])</span>
-<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="n">resource</span><span class="o">.</span><span class="n">title</span>  <span class="c1"># &quot;New&quot;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="n">body</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;data&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;type&quot;</span><span class="p">:</span> <span class="s2">&quot;articles&quot;</span><span class="p">,</span> <span class="s2">&quot;attributes&quot;</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;title&quot;</span><span class="p">:</span> <span class="s2">&quot;New&quot;</span><span class="p">}}}</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="n">resource</span> <span class="o">=</span> <span class="n">ArticleResource</span><span class="o">.</span><span class="n">_from_jsonapi_payload</span><span class="p">(</span><span class="n">body</span><span class="p">,</span> <span class="n">fields</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;title&quot;</span><span class="p">])</span>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="n">resource</span><span class="o">.</span><span class="n">title</span>  <span class="c1"># &quot;New&quot;</span>
 </code></pre></div>
 <h3 id="meta-field"><code>meta</code> field</h3>
 <p>Every Resource can carry a <code>meta</code> dict, serialized at the resource level:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="n">resource</span><span class="o">.</span><span class="n">meta</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;computed&quot;</span><span class="p">:</span> <span class="mi">42</span><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="n">resource</span><span class="o">.</span><span class="n">meta</span> <span class="o">=</span> <span class="p">{</span><span class="s2">&quot;computed&quot;</span><span class="p">:</span> <span class="mi">42</span><span class="p">}</span>
 </code></pre></div>
 <h3 id="factory-pattern">Factory pattern</h3>
 <p>The <code>from_model</code> pattern in examples is not built-in — write it yourself:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="nd">@classmethod</span>
-<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="k">def</span><span class="w"> </span><span class="nf">from_model</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">article</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Self</span><span class="p">:</span>
-<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>    <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span>
-<a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>        <span class="nb">id</span><span class="o">=</span><span class="n">article</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
-<a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>        <span class="n">title</span><span class="o">=</span><span class="n">article</span><span class="o">.</span><span class="n">title</span><span class="p">,</span>
-<a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a>        <span class="n">content</span><span class="o">=</span><span class="n">article</span><span class="o">.</span><span class="n">content</span><span class="p">,</span>
-<a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a>        <span class="n">created_at</span><span class="o">=</span><span class="n">article</span><span class="o">.</span><span class="n">created_at</span><span class="p">,</span>
-<a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a>        <span class="n">author</span><span class="o">=</span><span class="n">article</span><span class="o">.</span><span class="n">author_id</span><span class="p">,</span>
-<a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a>    <span class="p">)</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="nd">@classmethod</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="k">def</span><span class="w"> </span><span class="nf">from_model</span><span class="p">(</span><span class="bp">cls</span><span class="p">,</span> <span class="n">article</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">Self</span><span class="p">:</span>
+<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a>    <span class="k">return</span> <span class="bp">cls</span><span class="p">(</span>
+<a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>        <span class="nb">id</span><span class="o">=</span><span class="n">article</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
+<a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>        <span class="n">title</span><span class="o">=</span><span class="n">article</span><span class="o">.</span><span class="n">title</span><span class="p">,</span>
+<a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a>        <span class="n">content</span><span class="o">=</span><span class="n">article</span><span class="o">.</span><span class="n">content</span><span class="p">,</span>
+<a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a>        <span class="n">created_at</span><span class="o">=</span><span class="n">article</span><span class="o">.</span><span class="n">created_at</span><span class="p">,</span>
+<a id="__codelineno-14-8" name="__codelineno-14-8" href="#__codelineno-14-8"></a>        <span class="n">author</span><span class="o">=</span><span class="n">article</span><span class="o">.</span><span class="n">author_id</span><span class="p">,</span>
+<a id="__codelineno-14-9" name="__codelineno-14-9" href="#__codelineno-14-9"></a>    <span class="p">)</span>
 </code></pre></div>
 
 

@@ -34,6 +34,14 @@ export default function ArticleList() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["articles"] }),
   });
 
+  const publishMut = useMutation({
+    mutationFn: async (id: number) => {
+      const a = await sdk.articles.get(String(id));
+      await a.rpc('publish');
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["articles"] }),
+  });
+
   if (articles.isPending)
     return <div className="p-6 text-slate-500">Loading…</div>;
   if (articles.error)
@@ -84,6 +92,7 @@ export default function ArticleList() {
                 <tr>
                   <th className="px-4 py-3 font-medium">Title</th>
                   <th className="px-4 py-3 font-medium">Author</th>
+                  <th className="px-4 py-3 font-medium">Published</th>
                   <th className="px-4 py-3 font-medium">Created</th>
                   <th className="px-4 py-3 font-medium text-right">Actions</th>
                 </tr>
@@ -102,6 +111,17 @@ export default function ArticleList() {
                     <td className="px-4 py-3 text-slate-600">
                       {a.author?.id ?? "—"}
                     </td>
+                    <td className="px-4 py-3">
+                      {a.published ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                          Published
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">
+                          Draft
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-slate-500 text-xs">
                       {new Date(a.created_at).toLocaleDateString()}
                     </td>
@@ -112,6 +132,17 @@ export default function ArticleList() {
                       >
                         Edit
                       </Link>
+                      {!a.published && (
+                        <button
+                          onClick={() => {
+                            if (window.confirm(`Publish "${a.title}"?`))
+                              publishMut.mutate(Number(a.id));
+                          }}
+                          className="text-green-600 hover:text-green-800 text-xs font-medium mr-3"
+                        >
+                          Publish
+                        </button>
+                      )}
                       <button
                         onClick={() => {
                           if (window.confirm(`Delete "${a.title}"?`))

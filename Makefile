@@ -52,7 +52,7 @@ docs:
 	uv run mkdocs build
 
 docs_serve:
-	uv run mkdocs serve
+	uv run mkdocs serve --dev-addr localhost:8001
 
 # ── Tests ───────────────────────────────────────────────────────────────────
 

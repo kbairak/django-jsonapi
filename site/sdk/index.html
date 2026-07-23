@@ -952,10 +952,10 @@
 is plain code that mirrors your exact resource types, operations, query
 parameters — with full IDE autocomplete.</p>
 <h2 id="how-it-works">How it works</h2>
-<p>The server's <code>DjsonApi</code> registry holds every endpoint, resource class, and
-query parameter. The SDK generator reads this registry and writes plain source
-files. You copy the output directory into your project and install the
-dependencies manually (only <code>aiohttp</code> for Python, zero for TypeScript).</p>
+<p>The server's <code>DjsonApi</code> registry holds every endpoint, resource class, and query
+parameter. The SDK generator reads this registry and writes plain source files.
+You copy the output directory into your project and install the dependencies
+manually (only <code>aiohttp</code> for Python, zero for TypeScript).</p>
 <p>The generated package contains:</p>
 <ul>
 <li>A concrete class per resource type with the exact fields, relationships, and
@@ -1012,7 +1012,7 @@ value:</p>
 </div>
 </div>
 </div>
-<!-- SCREENSHOT: VSCode split screen showing Python SDK autocomplete on left, TypeScript on right -->
+<p><img alt="IDE autocomplete" src="ide_screenshot.png" /></p>
 
 
 

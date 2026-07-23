@@ -1024,17 +1024,17 @@
 
 
 <h1 id="djsonapi-jsonapi-for-django">djsonapi — JSON:API for Django</h1>
-<p><a href="https://jsonapi.org/">JSON:API</a> is a spec that makes you stop arguing about
-API design and start shipping. Every decision is made ahead of time — how
-attributes differ from relationships, how to request sparse fields, how to
-paginate, how to sideload related resources. One consistent wire format means
-one client generator, one docs strategy, one way to think.</p>
+<p><a href="https://jsonapi.org/">JSON:API</a> is a spec that makes you stop arguing about API
+design and start shipping. Every decision is made ahead of time — how attributes
+differ from relationships, how to request sparse fields, how to paginate, how to
+sideload related resources. One consistent wire format means one client
+generator, one docs strategy, one way to think.</p>
 <p>djsonapi gives you:</p>
 <ul>
 <li><strong>Minimal Resource classes</strong> — pydantic-adjacent, behave like dataclasses,
   type annotations drive everything</li>
-<li><strong>FastAPI-style decorators</strong> — JSON:API-aware, auto-validate, auto-parse
-  query params, generate OpenAPI</li>
+<li><strong>FastAPI-style decorators</strong> — JSON:API-aware, auto-validate, auto-parse query
+  params, generate OpenAPI</li>
 <li><strong>Free OpenAPI 3.0.3 + Redoc docs</strong> — at <code>/api/openapi.json</code> and <code>/api/docs/</code></li>
 <li><strong>Python &amp; TypeScript SDKs</strong> — generated from your API, sealed types, IDE
   autocomplete</li>
@@ -1212,16 +1212,16 @@ one client generator, one docs strategy, one way to think.</p>
 </div>
 </div>
 </div>
-<div class="admonition tip">
-<p class="admonition-title">Why not a global singleton?</p>
-<p>The exported <code>sdk</code> is convenient for simple apps, but a single global config
-is unsafe when background tasks make requests on behalf of different users
-(e.g., OAuth). Instantiate separate SDKs with their own config:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="n">admin_sdk</span> <span class="o">=</span> <span class="n">SDK</span><span class="p">(</span><span class="n">host</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">headers</span><span class="o">=</span><span class="k">lambda</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;Authorization&quot;</span><span class="p">:</span> <span class="s2">&quot;Bearer &quot;</span> <span class="o">+</span> <span class="n">admin_token</span><span class="p">})</span>
-<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>
-<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="n">user_sdk</span> <span class="o">=</span> <span class="n">SDK</span><span class="p">(</span><span class="n">host</span><span class="o">=</span><span class="s2">&quot;...&quot;</span><span class="p">,</span> <span class="n">headers</span><span class="o">=</span><span class="k">lambda</span><span class="p">:</span> <span class="p">{</span><span class="s2">&quot;Authorization&quot;</span><span class="p">:</span> <span class="s2">&quot;Bearer &quot;</span> <span class="o">+</span> <span class="n">user_token</span><span class="p">})</span>
+<p>!!! tip "Why not a global singleton?" The exported <code>sdk</code> is convenient for
+simple apps, but a single global config is unsafe when background tasks make
+requests on behalf of different users (e.g., OAuth). Instantiate separate SDKs
+with their own config:</p>
+<div class="highlight"><pre><span></span><code>```python
+admin_sdk = SDK(host=&quot;...&quot;, headers=lambda: {&quot;Authorization&quot;: &quot;Bearer &quot; + admin_token})
+
+user_sdk = SDK(host=&quot;...&quot;, headers=lambda: {&quot;Authorization&quot;: &quot;Bearer &quot; + user_token})
+```
 </code></pre></div>
-</div>
 <h3 id="ide-autocompletion">IDE autocompletion</h3>
 <p>Every method, every filter, every field — generated SDKs are fully typed:</p>
 <!-- SCREENSHOT: VSCode showing autocomplete popup for sdk.articles.get() with parameter hints -->

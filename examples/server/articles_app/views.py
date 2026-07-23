@@ -2,7 +2,7 @@ from math import ceil
 from typing import Any, Literal
 
 from django.db import IntegrityError
-from django.http import HttpRequest
+from django.http import HttpRequest, JsonResponse
 
 from djsonapi import Response
 from djsonapi.api import DjsonApi
@@ -134,6 +134,39 @@ def delete_article(request: HttpRequest, article_id: int) -> None:
     (count, _) = ArticleModel.objects.filter(pk=article_id).delete()
     if count == 0:
         raise NotFound()
+
+
+@api.rpc(
+    "articles",
+    "publish",
+    {
+        "summary": "Publish article",
+        "responses": {
+            "200": {
+                "description": "Publish result",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "properties": {
+                                "success": {"type": "boolean"},
+                                "published": {"type": "boolean"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+)
+def publish_article(request: HttpRequest, article_id: int) -> JsonResponse:
+    try:
+        article = ArticleModel.objects.get(id=article_id)
+    except ArticleModel.DoesNotExist:
+        raise NotFound(f"Article with id '{article_id}' not found")
+    article.published = True
+    article.save()
+    return JsonResponse({"success": True, "published": True})
 
 
 @api.get_related("articles", "author")

@@ -26,6 +26,15 @@ export default function ArticleForm() {
     enabled: isEdit,
   });
 
+  const publishMut = useMutation({
+    mutationFn: async () => {
+      const a = await sdk.articles.get(id!);
+      await a.rpc('publish');
+      return a;
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["articles"] }),
+  });
+
   useEffect(() => {
     if (article.data) {
       setTitle(article.data.title ?? "");
@@ -214,13 +223,38 @@ export default function ArticleForm() {
         </div>
 
         {isEdit && article.data && (
-          <div className="text-xs text-slate-400">
-            Created: {formatDate(article.data.created_at)}
+          <div className="flex items-center gap-4 text-xs text-slate-400">
+            <span>Created: {formatDate(article.data.created_at)}</span>
+            <span>
+              Status:{" "}
+              {article.data.published ? (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
+                  Published
+                </span>
+              ) : (
+                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600">
+                  Draft
+                </span>
+              )}
+            </span>
           </div>
         )}
 
         {error && (
           <div className="text-red-600 text-sm">{(error as Error).message}</div>
+        )}
+
+        {isEdit && article.data && !article.data.published && (
+          <div className="pt-2">
+            <button
+              type="button"
+              disabled={publishMut.isPending}
+              onClick={() => publishMut.mutate()}
+              className="bg-green-600 text-white px-4 py-2 rounded-md text-sm font-medium hover:bg-green-700 disabled:opacity-50"
+            >
+              {publishMut.isPending ? "Publishing…" : "Publish"}
+            </button>
+          </div>
         )}
 
         <div className="flex items-center gap-3 pt-2">

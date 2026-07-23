@@ -6,7 +6,7 @@ from djsonapi import Resource
 
 class Article(Resource):
     _type: ClassVar = "articles"
-    _attributes: ClassVar = ["title", "content", "created_at"]
+    _attributes: ClassVar = ["title", "content", "created_at", "published"]
     _singular_relationships: ClassVar = [("author", "users")]
     _plural_relationships: ClassVar = ["categories"]
     _create_fields: ClassVar = ["title", "content", "author", "categories"]
@@ -19,6 +19,7 @@ class Article(Resource):
     created_at: datetime.datetime
     author: int
     categories: list[int] | None = None
+    published: bool = False
 
     @classmethod
     def from_model(cls, article) -> Self:
@@ -28,6 +29,7 @@ class Article(Resource):
             content=article.content,
             author=article.author_id,
             created_at=article.created_at,
+            published=article.published,
             categories=list(article.categories.values_list("id", flat=True)),
         )
 
