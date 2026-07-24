@@ -174,10 +174,11 @@ One command generates a sealed, typed client:
     await article.delete();
     ```
 
-!!! tip "Why not a global singleton?" The exported `sdk` is convenient for
-simple apps, but a single global config is unsafe when background tasks make
-requests on behalf of different users (e.g., OAuth). Instantiate separate SDKs
-with their own config:
+!!! tip "Why not a global singleton?"
+
+    The exported `sdk` is convenient for simple apps, but a single global config
+    is unsafe when background tasks make requests on behalf of different users
+    (e.g., OAuth). Instantiate separate SDKs with their own config:
 
     ```python
     admin_sdk = SDK(host="...", headers=lambda: {"Authorization": "Bearer " + admin_token})
