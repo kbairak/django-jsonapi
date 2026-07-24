@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# MkDocs build output
+site/
+
 # Generated SDKs (examples)
 examples/clienttest_py/articles_sdk/
 examples/clienttest_ts/articles_sdk/
