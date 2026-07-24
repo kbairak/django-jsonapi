@@ -1,6 +1,6 @@
 site_name: djsonapi
 site_description: JSON:API framework for Django
-repo_url: https://github.com/kbairak/django-jsonapi
+repo_url: https://github.com/kbairak/djsonapi
 theme:
   name: material
   features:
