@@ -256,6 +256,12 @@ Plural relationships return a `Collection` instead of a single resource.
     for (const cat of article.categories) {
         console.log(cat.name);
     }
+
+    // With include — pre-populated
+    const article2 = await sdk.articles.get(1, "categories");
+    for (const cat of article2.categories) {
+        console.log(cat.name);
+    }
     ```
 
 ### Mutating relationships
